@@ -1,0 +1,253 @@
+{
+  "currency": "INR",
+  "materials": [
+    { "id": "mat_paint_warm_white", "name": "Interior wall paint — warm white", "unit": "L", "unit_price": 520.0 },
+    { "id": "mat_paint_greige", "name": "Interior wall paint — soft greige", "unit": "L", "unit_price": 580.0 },
+    { "id": "mat_oak_veneer", "name": "Oak veneer (furniture finish)", "unit": "item", "unit_price": 0.0 },
+    { "id": "mat_powder_coated_black", "name": "Powder-coated steel — matte black", "unit": "item", "unit_price": 0.0 },
+    { "id": "mat_boucle_cream", "name": "Bouclé upholstery — cream", "unit": "item", "unit_price": 0.0 },
+    { "id": "mat_linen_beige", "name": "Linen upholstery — beige", "unit": "item", "unit_price": 0.0 },
+    { "id": "mat_wool_rug_neutral", "name": "Wool rug pile — neutral", "unit": "item", "unit_price": 0.0 },
+    { "id": "mat_engineered_oak_floor", "name": "Engineered oak flooring", "unit": "m2", "unit_price": 3200.0 },
+    { "id": "mat_ceramic_tile_light", "name": "Ceramic floor tile — light stone look", "unit": "m2", "unit_price": 2100.0 },
+    { "id": "mat_sheer_curtain_white", "name": "Sheer curtain — white", "unit": "m", "unit_price": 650.0 },
+    { "id": "mat_blackout_curtain_taupe", "name": "Blackout curtain — taupe", "unit": "m", "unit_price": 890.0 }
+    ,
+    { "id": "mat_stone_marble_white", "name": "Stone — white marble (finish)", "unit": "m2", "unit_price": 6800.0 },
+    { "id": "mat_stone_granite_black", "name": "Stone — black granite (finish)", "unit": "m2", "unit_price": 4200.0 },
+    { "id": "mat_wood_walnut_veneer", "name": "Walnut veneer (furniture finish)", "unit": "item", "unit_price": 0.0 }
+  ],
+  "items": [
+    {
+      "id": "item_bed_platform_oak_queen",
+      "name": "Platform bed — oak veneer (queen)",
+      "category": "bedroom",
+      "price": 45990.0,
+      "material_ids": ["mat_oak_veneer"]
+    },
+    {
+      "id": "item_bed_platform_walnut_queen",
+      "name": "Platform bed — walnut veneer (queen)",
+      "category": "bedroom",
+      "price": 68990.0,
+      "material_ids": ["mat_wood_walnut_veneer"]
+    },
+    {
+      "id": "item_bed_upholstered_linen_queen",
+      "name": "Upholstered bed — beige linen (queen)",
+      "category": "bedroom",
+      "price": 79990.0,
+      "material_ids": ["mat_linen_beige"]
+    },
+    {
+      "id": "item_bedside_table_oak_2pk",
+      "name": "Bedside table — oak veneer (2-pack)",
+      "category": "bedroom",
+      "price": 14990.0,
+      "material_ids": ["mat_oak_veneer"]
+    },
+    {
+      "id": "item_bedside_table_stone_oak_2pk",
+      "name": "Bedside table — oak + stone top (2-pack)",
+      "category": "bedroom",
+      "price": 24990.0,
+      "material_ids": ["mat_oak_veneer", "mat_stone_marble_white"]
+    },
+    {
+      "id": "item_wardrobe_oak_180",
+      "name": "Wardrobe — oak veneer (180 cm)",
+      "category": "bedroom",
+      "price": 54990.0,
+      "material_ids": ["mat_oak_veneer"]
+    },
+    {
+      "id": "item_wardrobe_walnut_220", 
+      "name": "Wardrobe — walnut veneer (220 cm)",
+      "category": "bedroom",
+      "price": 89990.0,
+      "material_ids": ["mat_wood_walnut_veneer"]
+    },
+    {
+      "id": "item_dresser_oak_120",
+      "name": "Dresser — oak veneer (120 cm)",
+      "category": "bedroom",
+      "price": 29990.0,
+      "material_ids": ["mat_oak_veneer"]
+    },
+    {
+      "id": "item_vanity_stone_top_100",
+      "name": "Vanity console — stone top (100 cm)",
+      "category": "bedroom",
+      "price": 35990.0,
+      "material_ids": ["mat_stone_granite_black", "mat_oak_veneer"]
+    },
+    {
+      "id": "item_wall_cladding_stone_m2",
+      "name": "Accent wall cladding — stone (per m²)",
+      "category": "finishes",
+      "price": 6800.0,
+      "material_ids": ["mat_stone_marble_white"]
+    },
+    {
+      "id": "item_wall_cladding_stone_dark_m2",
+      "name": "Accent wall cladding — dark stone (per m²)",
+      "category": "finishes",
+      "price": 4200.0,
+      "material_ids": ["mat_stone_granite_black"]
+    },
+    {
+      "id": "item_sofa_fabric_grey_3s",
+      "name": "3-seat sofa — mid-grey performance fabric",
+      "category": "seating",
+      "price": 48990.0,
+      "material_ids": ["mat_powder_coated_black"]
+    },
+    {
+      "id": "item_sofa_leather_tan_3s",
+      "name": "3-seat sofa — tan leather",
+      "category": "seating",
+      "price": 124990.0,
+      "material_ids": ["mat_powder_coated_black"]
+    },
+    {
+      "id": "item_sofa_boucle_3s",
+      "name": "3-seat sofa — cream bouclé",
+      "category": "seating",
+      "price": 74990.0,
+      "material_ids": ["mat_boucle_cream", "mat_powder_coated_black"]
+    },
+    {
+      "id": "item_sofa_linen_3s",
+      "name": "3-seat sofa — beige linen",
+      "category": "seating",
+      "price": 62990.0,
+      "material_ids": ["mat_linen_beige", "mat_powder_coated_black"]
+    },
+    {
+      "id": "item_coffee_table_oak_round",
+      "name": "Round coffee table — oak veneer",
+      "category": "tables",
+      "price": 18990.0,
+      "material_ids": ["mat_oak_veneer"]
+    },
+    {
+      "id": "item_side_table_black",
+      "name": "Side table — matte black steel",
+      "category": "tables",
+      "price": 8990.0,
+      "material_ids": ["mat_powder_coated_black"]
+    },
+    {
+      "id": "item_tv_unit_oak_180",
+      "name": "TV unit — oak veneer (180 cm)",
+      "category": "storage",
+      "price": 24990.0,
+      "material_ids": ["mat_oak_veneer"]
+    },
+    {
+      "id": "item_bookshelf_black_180",
+      "name": "Open bookshelf — matte black (180 cm)",
+      "category": "storage",
+      "price": 19990.0,
+      "material_ids": ["mat_powder_coated_black"]
+    },
+    {
+      "id": "item_rug_wool_200x300",
+      "name": "Area rug — wool neutral (200×300 cm)",
+      "category": "rugs",
+      "price": 21990.0,
+      "material_ids": ["mat_wool_rug_neutral"]
+    },
+    {
+      "id": "item_rug_wool_160x230",
+      "name": "Area rug — wool neutral (160×230 cm)",
+      "category": "rugs",
+      "price": 13990.0,
+      "material_ids": ["mat_wool_rug_neutral"]
+    },
+    {
+      "id": "item_pendant_linear_black",
+      "name": "Linear pendant light — matte black",
+      "category": "lighting",
+      "price": 14990.0,
+      "material_ids": ["mat_powder_coated_black"]
+    },
+    {
+      "id": "item_floor_lamp_arc_black",
+      "name": "Arc floor lamp — matte black",
+      "category": "lighting",
+      "price": 11990.0,
+      "material_ids": ["mat_powder_coated_black"]
+    },
+    {
+      "id": "item_table_lamp_ceramic_white",
+      "name": "Table lamp — white ceramic + linen shade",
+      "category": "lighting",
+      "price": 7990.0,
+      "material_ids": ["mat_linen_beige"]
+    },
+    {
+      "id": "item_dining_table_oak_160",
+      "name": "Dining table — oak veneer (160 cm)",
+      "category": "dining",
+      "price": 32990.0,
+      "material_ids": ["mat_oak_veneer"]
+    },
+    {
+      "id": "item_dining_table_oak_120",
+      "name": "Dining table — oak veneer (120 cm)",
+      "category": "dining",
+      "price": 24990.0,
+      "material_ids": ["mat_oak_veneer"]
+    },
+    {
+      "id": "item_dining_chair_black_2pk",
+      "name": "Dining chair — matte black (2-pack)",
+      "category": "dining",
+      "price": 13990.0,
+      "material_ids": ["mat_powder_coated_black"]
+    },
+    {
+      "id": "item_curtain_sheer_white",
+      "name": "Sheer curtains — white (per 5 m)",
+      "category": "window",
+      "price": 4990.0,
+      "material_ids": ["mat_sheer_curtain_white"]
+    },
+    {
+      "id": "item_curtain_blackout_taupe",
+      "name": "Blackout curtains — taupe (per 5 m)",
+      "category": "window",
+      "price": 7490.0,
+      "material_ids": ["mat_blackout_curtain_taupe"]
+    },
+    {
+      "id": "item_flooring_engineered_oak",
+      "name": "Engineered oak flooring (per m²)",
+      "category": "finishes",
+      "price": 3200.0,
+      "material_ids": ["mat_engineered_oak_floor"]
+    },
+    {
+      "id": "item_floor_tile_ceramic_light",
+      "name": "Ceramic tile flooring — light stone (per m²)",
+      "category": "finishes",
+      "price": 2100.0,
+      "material_ids": ["mat_ceramic_tile_light"]
+    },
+    {
+      "id": "item_paint_warm_white",
+      "name": "Wall paint — warm white (per L)",
+      "category": "finishes",
+      "price": 520.0,
+      "material_ids": ["mat_paint_warm_white"]
+    },
+    {
+      "id": "item_paint_greige",
+      "name": "Wall paint — soft greige (per L)",
+      "category": "finishes",
+      "price": 580.0,
+      "material_ids": ["mat_paint_greige"]
+    }
+  ]
+}

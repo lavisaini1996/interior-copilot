@@ -1,0 +1,83 @@
+        <section className="card">
+          <div className="cardTitle">Design options (catalog only, {designCurrency})</div>
+          {isBusy && !designs.length ? (
+            <div className="empty">
+              <div className="smallTitle">Generating…</div>
+              <div className="muted">We’re applying your selected services + materials, then generating images.</div>
+              {(() => {
+                const cur = stepIndex(genStep);
+                return (
+                  <div className="stepper" style={{ marginTop: 12 }}>
+                    {genSteps.map((s, i) => {
+                      const done = cur >= 0 && i < cur;
+                      const active = cur === i;
+                      return (
+                        <div key={s.key} className={`step ${done ? "done" : ""} ${active ? "active" : ""}`}>
+                          <div className="rail" aria-hidden="true">
+                            <div className="dot" />
+                            {i < genSteps.length - 1 ? <div className="line" /> : null}
+                          </div>
+                          <div className="stepBody">
+                            <div className="stepTitle">
+                              {i + 1}. {s.label}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </div>
+          ) : designs.length ? (
+            <div className="images">
+              {designs.map((d, i) => (
+                <div className="imgWrap" key={i}>
+                  {d.image_base64_png ? (
+                    <img className="img" src={b64ToDataUrlPng(d.image_base64_png)} alt={`Design option ${i + 1}`} />
+                  ) : (
+                    <div className="empty">No image returned for this option.</div>
+                  )}
+                  <div className="smallTitle">
+                    Option {i + 1}: {d.title}
+                  </div>
+                  {d.placement_summary ? (
+                    <pre className="content placementMap">{d.placement_summary}</pre>
+                  ) : null}
+                  <pre className="content">{d.rationale}</pre>
+
+                  <div className="prompts">
+                    <div className="smallTitle">Catalog items</div>
+                    <ul>
+                      {d.catalog_items.map((it) => (
+                        <li key={it.id} className="mono">
+                          {it.name} — {formatINR(it.price)}
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="smallTitle">Materials (priced)</div>
+                    <ul>
+                      {d.materials.map((m) => (
+                        <li key={m.material_id} className="mono">
+                          {m.name}: {m.quantity} {m.unit} × {formatINR(m.unit_price)} = {formatINR(m.subtotal)}
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="pill ok">Estimated total: {formatINR(d.estimated_total)}</div>
+                  </div>
+
+                  {d.image_base64_png ? (
+                    <a className="download" href={b64ToDataUrlPng(d.image_base64_png)} download={`design_${i + 1}.png`}>
+                      Download PNG
+                    </a>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="empty">
+              No designs yet. Answer follow-ups until the brief shows complete, add a floor plan (image or text), then click
+              Generate designs.
+            </div>
+          )}
+        </section>

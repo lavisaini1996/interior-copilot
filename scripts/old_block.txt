@@ -1,0 +1,251 @@
+
+          <div className="chat">
+            {chat.map((m, idx) => (
+              <div key={idx} className={`msg ${m.role}`}>
+                <div className="role">{m.role}</div>
+                <pre className="content">{m.content}</pre>
+              </div>
+            ))}
+          </div>
+
+          <div className="uploadRow">
+            <div className="uploadMeta">
+              <div className="smallTitle">Floor plan (image or text)</div>
+              <div className="muted">Upload a floor plan screenshot/photo, or describe it below.</div>
+            </div>
+            <label className="fileBtn">
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => onPickFloorplan(e.target.files)}
+                disabled={isBusy}
+              />
+              Add floor plan image
+            </label>
+            {floorplanRefs.length ? (
+              <button className="btn secondary" onClick={() => setFloorplanRefs([])} disabled={isBusy}>
+                Clear
+              </button>
+            ) : null}
+          </div>
+          {floorplanRefs.length ? (
+            <div className="thumbs">
+              {floorplanRefs.map((r) => (
+                <div className="thumb" key={r.id} title={r.name}>
+                  <img className="thumbImg" src={r.preview_data_url} alt={r.name} />
+                  <button
+                    className="thumbX"
+                    onClick={() => setFloorplanRefs((prev) => prev.filter((x) => x.id !== r.id))}
+                    disabled={isBusy}
+                    aria-label={`Remove ${r.name}`}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          {floorplanRefs.length ? (
+            <div className="fpNorthPanel">
+              <div className="smallTitle">Plan north — doors &amp; windows per wall</div>
+              <div className="muted" style={{ marginBottom: 8 }}>
+                Align the arrow with north on your drawing (degrees clockwise from the top of the image). After you pick a
+                room, we scan the plan and list doors and windows under each wall in Wall layout.
+              </div>
+              <div className="fpNorthRow">
+                <div className="fpNorthPreview">
+                  <img className="fpNorthImg" src={floorplanRefs[0].preview_data_url} alt="Floor plan orientation" />
+                  <div
+                    className="fpNorthArrow"
+                    style={{
+                      transform: `rotate(${Number((brief as any).floorplan_north_clockwise_deg ?? 0)}deg)`,
+                      transformOrigin: "50% 100%",
+                    }}
+                  >
+                    <span className="fpNorthStem" />
+                    <span className="fpNorthTip">N</span>
+                  </div>
+                </div>
+                <div className="fpNorthControl">
+                  <label className="muted" htmlFor="fpNorthRange">
+                    North from image top (clockwise): {Number((brief as any).floorplan_north_clockwise_deg ?? 0)}°
+                  </label>
+                  <input
+                    id="fpNorthRange"
+                    type="range"
+                    min={0}
+                    max={359}
+                    value={Number((brief as any).floorplan_north_clockwise_deg ?? 0)}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      setBrief((b) => ({ ...b, floorplan_north_clockwise_deg: v }));
+                    }}
+                    onPointerUp={(e) => {
+                      const v = Number((e.currentTarget as HTMLInputElement).value);
+                      setBrief((prev) => {
+                        const merged = { ...prev, floorplan_north_clockwise_deg: v };
+                        queueMicrotask(() => void syncFloorplanIntake(merged as Record<string, unknown>));
+                        return merged;
+                      });
+                    }}
+                    disabled={isBusy}
+                  />
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {detectedRooms.length > 1 ? (
+            <div className="uploadRow">
+              <div className="uploadMeta">
+                <div className="smallTitle">Select room from floor plan</div>
+                <div className="muted">If you uploaded a whole-house plan, pick the room you want to design.</div>
+              </div>
+              <select
+                className="select"
+                value={String((brief as any)?.selected_room_id ?? "")}
+                onChange={(e) => {
+                  void (async () => {
+                    const id = e.target.value || null;
+                    const room = detectedRooms.find((x: any) => String(x?.id) === String(id));
+                    const nextBrief: Record<string, unknown> = {
+                      ...brief,
+                      selected_room_id: id,
+                      selected_room_name: room?.name ?? null,
+                      room_length_m: room?.length_m ?? (brief as any).room_length_m,
+                      room_width_m: room?.width_m ?? (brief as any).room_width_m,
+                    };
+                    setBrief(nextBrief);
+                    if (floorplanRefs.length) await syncFloorplanIntake(nextBrief);
+                  })();
+                }}
+                disabled={isBusy}
+              >
+                <option value="">Select room…</option>
+                {detectedRooms.map((r: any) => (
+                  <option key={String(r.id)} value={String(r.id)}>
+                    {String(r.name)}
+                    {r.length_m && r.width_m ? ` (${r.length_m}m × ${r.width_m}m)` : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
+
+          {floorplanRefs.length || brief.space_type ? (
+            <div className="wlCard">
+              <div className="smallTitle">Wall layout (optional)</div>
+              <div className="muted" style={{ marginBottom: 8 }}>
+                Click each wall and choose what should go there. Items that do not fit (doors/windows or wall length) are
+                blocked with a message. Generated images include a compass and a placement map below.
+              </div>
+              <WallLayout
+                brief={brief}
+                assignments={
+                  ((brief as any).wall_assignments as WallAssignments) || { ...EMPTY_WALL_ASSIGNMENTS }
+                }
+                openings={((brief as any).wall_openings as WallAssignments) || { ...EMPTY_WALL_ASSIGNMENTS }}
+                items={WALL_ITEMS_BY_ROOM[resolveRoomItemKey(brief)] || WALL_ITEMS_BY_ROOM.bedroom}
+                roomLabel={
+                  String(
+                    (brief as any).selected_room_name ||
+                      (brief as any).space_type ||
+                      "Bedroom",
+                  )
+                }
+                disabled={isBusy}
+                onChange={(next) =>
+                  setBrief((b) => ({
+                    ...b,
+                    wall_assignments: next,
+                  }))
+                }
+              />
+            </div>
+          ) : null}
+
+          <textarea
+            className="input"
+            placeholder="Floor plan text (optional). Example: “Room 4.2m x 3.6m, door on south wall near left, window on east wall, TV wall north, want sofa facing TV.”"
+            value={floorplanText}
+            onChange={(e) => setFloorplanText(e.target.value)}
+            rows={3}
+            disabled={isBusy}
+          />
+
+          <div className="uploadRow">
+            <div className="uploadMeta">
+              <div className="smallTitle">Optional: style reference images</div>
+              <div className="muted">Helps infer style, palette, and materials.</div>
+            </div>
+            <label className="fileBtn">
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={(e) => onPickStyleImages(e.target.files)}
+                disabled={isBusy}
+              />
+              Add style images
+            </label>
+            {styleRefs.length ? (
+              <button className="btn secondary" onClick={() => setStyleRefs([])} disabled={isBusy}>
+                Clear
+              </button>
+            ) : null}
+          </div>
+          {styleRefs.length ? (
+            <div className="thumbs">
+              {styleRefs.map((r) => (
+                <div className="thumb" key={r.id} title={r.name}>
+                  <img className="thumbImg" src={r.preview_data_url} alt={r.name} />
+                  <button
+                    className="thumbX"
+                    onClick={() => setStyleRefs((prev) => prev.filter((x) => x.id !== r.id))}
+                    disabled={isBusy}
+                    aria-label={`Remove ${r.name}`}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="composer">
+            <textarea
+              className="input"
+              placeholder="Your answer…"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              rows={3}
+              disabled={isBusy}
+            />
+            <button className="btn primary" onClick={onSend} disabled={isBusy || !input.trim()}>
+              Send
+            </button>
+          </div>
+
+          {error ? (
+            <div className="error">
+              <div className="errorTitle">Error</div>
+              <pre className="errorBody">{error}</pre>
+              <div className="hint">
+                Make sure the backend is running and that <code>GEMINI_API_KEY</code> is set in <code>.env</code>.
+              </div>
+            </div>
+          ) : null}
+
+          <div className="statusRow">
+            <div className={`pill ${isComplete ? "ok" : "warn"}`}>
+              {isComplete ? "Brief complete" : "Needs more info"}
+            </div>
+            {pendingQuestions.length ? (
+              <div className="pill neutral">{pendingQuestions.length} follow-up question(s)</div>
+            ) : (
+              <div className="pill neutral">No pending questions</div>
+            )}
+            {isBusy ? <div className="pill neutral">Working…</div> : null}
+          </div>
+        </section>

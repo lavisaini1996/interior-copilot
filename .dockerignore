@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+frontend/
+node_modules/
+**/__pycache__
+**/*.pyc
+.git
+.cursor
+scripts/
+*.md
+!README.md
+terminals/
+assets/
