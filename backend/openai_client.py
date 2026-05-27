@@ -195,6 +195,51 @@ def extract_rooms_from_floorplan(*, cfg: OpenAIConfig, floorplan_images: List[Di
     return data
 
 
+def extract_plan_north_from_floorplan(
+    *, cfg: OpenAIConfig, floorplan_images: List[Dict[str, str]]
+) -> Dict[str, Any]:
+    if not floorplan_images:
+        return {"north_clockwise_deg": 0.0, "has_north_indicator": False, "notes": ""}
+
+    system = (
+        "You read architectural floor plans. Determine which direction is geographic/plan NORTH on the drawing.\n"
+        "Output north_clockwise_deg: degrees clockwise from the TOP of the image to north "
+        "(0=top is north, 90=right is north, 180=bottom, 270=left).\n"
+        "Use a north arrow, N label, or compass symbol when visible. If none, has_north_indicator=false and north_clockwise_deg=0."
+    )
+
+    schema: Dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "north_clockwise_deg": {"type": "number"},
+            "has_north_indicator": {"type": "boolean"},
+            "notes": {"type": "string"},
+        },
+        "required": ["north_clockwise_deg", "has_north_indicator", "notes"],
+        "additionalProperties": False,
+    }
+
+    payload = {"task": "detect_plan_north_clockwise_from_image_top"}
+    client = _client(cfg)
+    resp = client.responses.create(
+        model=cfg.text_model,
+        input=_build_vision_input(system_text=system, user_json_payload=payload, context_images=floorplan_images),
+        temperature=0.1,
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "plan_north",
+                "schema": schema,
+                "strict": True,
+            }
+        },
+    )
+    data = json.loads(resp.output_text or "{}")
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Unexpected extraction shape: {data}")
+    return data
+
+
 def extract_wall_openings_from_floorplan(
     *,
     cfg: OpenAIConfig,
@@ -215,18 +260,11 @@ def extract_wall_openings_from_floorplan(
         d = 0.0
 
     system = (
-        "You read architectural floor plans. Identify DOORS and WINDOWS (and balcony sliders / glazed doors) that "
-        "belong to the TARGET ROOM's boundary walls only. Ignore openings in adjacent rooms unless they clearly sit on a "
-        "shared wall segment of the target room.\n"
-        "For each opening, assign it to exactly one compass wall of the room: north, south, east, or west.\n"
-        "Compass rule: treat geographic/plan NORTH as the direction found by rotating CLOCKWISE from the TOP of the image "
-        f"by {d:.0f} degrees. (0° = image top is north; 90° = image right edge is north; 180° = image bottom is north; "
-        "270° = image left edge is north.) If the sheet shows a north arrow that clearly disagrees with this mapping, "
-        "still follow this compass rule so labels stay consistent with the user's orientation control.\n"
-        "Each list entry should be a short human-readable phrase, e.g. "
-        "'single swing door, left third of wall', 'two-panel sliding window, centred', 'full-height glazing wall'.\n"
-        "If an opening type is uncertain, describe what you see. If nothing is visible for a wall, use an empty array. "
-        "Do not invent openings. Output ONLY valid JSON matching the schema."
+        "You read architectural floor plans. Identify DOORS and WINDOWS on the TARGET ROOM's boundary walls only.\n"
+        "Use the north arrow / N label ON THE DRAWING as plan north. Assign each opening to north, south, east, or west.\n"
+        f"If no north symbol on sheet, use hint: {d:.0f}° clockwise from image top to north. If arrow disagrees with hint, trust the arrow.\n"
+        "Each phrase must include type, destination label from plan (e.g. to Hallway, to Walk-in Closet), and position on wall.\n"
+        "Do not invent or move openings. Output ONLY valid JSON matching the schema."
     )
 
     schema: Dict[str, Any] = {
@@ -486,7 +524,14 @@ def generate_moodboard_prompts(
     return prompts[:n]
 
 
-def generate_images(*, cfg: OpenAIConfig, prompt: str, n: int = 1) -> List[bytes]:
+def generate_images(
+    *,
+    cfg: OpenAIConfig,
+    prompt: str,
+    n: int = 1,
+    floorplan_images: List[Dict[str, str]] | None = None,
+) -> List[bytes]:
+    _ = floorplan_images  # OpenAI path: text-only image models
     client = _client(cfg)
     # For gpt-image models, omit response_format (some gateways reject it);
     # b64_json is typically returned by default.
@@ -575,14 +620,16 @@ def generate_catalog_designs(
         "Material rule: if brief.material_preferences is set (e.g. wood/metal/linen/leather/stone), prefer catalog items/materials that align.\n"
         "If a material preference is provided (example: stone), at least one major visible element MUST use it when available in the catalog "
         "(e.g. stone-top bedside, stone accent wall). If it cannot be satisfied with the catalog, say so in the rationale and pick the closest match.\n"
-        "Wall placement rule: when brief.wall_assignments is provided (object with arrays for north/south/east/west walls), or when the chat history contains a message starting with 'WALL LAYOUT', each listed item type MUST be placed visibly along the named wall AND explicitly mentioned in the image_prompt (e.g. 'bed centred on the north wall with upholstered headboard; TV unit mounted on the opposite south wall facing the bed'). "
-        "Opening rule: when brief.wall_openings lists doors, windows, sliders, or glazing on a compass wall, preserve them on that wall in the image_prompt (approximate position along the wall) and let furniture defer to those openings.\n"
+        "Wall placement rule: when brief.wall_assignments or brief.wall_openings is provided, or when chat contains 'WALL LAYOUT' or 'LOCKED LAYOUT', you MUST copy the LOCKED LAYOUT block verbatim at the start of every image_prompt, then add style/material details after it. Never move furniture or doors/windows to a different compass wall.\n"
+        "Opening rule: when brief.wall_openings lists doors, windows, sliders, or glazing on a compass wall, keep them on that wall only; furniture must not block those openings.\n"
+        "Anti-hallucination: do not invent extra walls, doors, windows, or furniture positions that contradict the locked layout.\n"
         "Pick concrete catalog SKUs that match each requested item type (e.g. for 'wardrobe' choose a catalog wardrobe; for 'bed' choose a catalog bed; for 'tv_unit' choose a catalog TV unit). If a requested item type has no matching catalog item, mention the gap in the rationale and select the closest substitute.\n"
         "Camera rule: when the assignment lists items on OPPOSING walls (north+south, or east+west), the image_prompt MUST describe a two-point/corner camera (e.g. 'wide-angle two-point perspective from the south-west corner looking toward the north-east, ~24mm equivalent') so BOTH opposing walls are visible in the rendered frame. Do not use a straight-on one-wall elevation when opposing walls are assigned. Mention the camera angle and which walls are visible in the image_prompt.\n"
+        "Spatial rule: after the LOCKED LAYOUT block, state where each compass wall appears in the frame (back/left/right/near) and place every hero item on that physical wall in the photograph.\n"
         "Rationale rule: the rationale MUST start with a one-line 'Layout:' summary listing each wall and what is on it (e.g. 'Layout: North—bed + sconces; South—TV unit; East—accent wall; West—wardrobe.'). "
         "Then add a 'Compass placement:' section that names EVERY major catalog item with its compass wall (NORTH/SOUTH/EAST/WEST) so the user can verify against their wall picker.\n"
-        "Image compass rule: every image_prompt MUST request a small compass-rose graphic in a corner (shape only, no N/S/E/W letters on the image). "
-        "State which wall each hero item is on using NORTH/SOUTH/EAST/WEST in the prompt text and rationale, not as labels on the compass.\n"
+        "Image render rule: photorealistic room only — NO logo, watermark, compass rose, text overlay, or corner badge. "
+        "Wall directions only in prompt text and rationale, never drawn on the image. Furniture and doors must appear on the correct physical walls.\n"
         "If some style/material preferences are missing, assume warm minimal, light neutrals, natural wood + black accents.\n"
         "Output ONLY valid JSON matching the schema. No markdown."
     )
@@ -649,7 +696,8 @@ def generate_catalog_designs(
             "Prefer describing realistic placement (e.g. sofa along longest wall, rug under seating group)",
             "Image prompts must be photorealistic, interior-specific, name each selected catalog item, and state room dimensions L×W×H in metres when available",
             "Image prompts must describe camera angle and layout so the rendered room matches the stated proportions",
-            "If brief.wall_assignments has any non-empty arrays, every image_prompt MUST place those item types on the corresponding walls and the rationale MUST acknowledge the wall layout explicitly",
+            "If brief.wall_assignments or brief.wall_openings has any non-empty arrays, every image_prompt MUST start with the LOCKED LAYOUT block from chat (if present) and the rationale MUST acknowledge the wall layout explicitly",
+            "Never contradict user wall_assignments or wall_openings — if unsure, repeat the locked layout verbatim rather than inventing a new plan",
         ],
     }
 
@@ -657,7 +705,7 @@ def generate_catalog_designs(
     resp = client.responses.create(
         model=cfg.text_model,
         input=_build_vision_input(system_text=system, user_json_payload=payload, context_images=context_images),
-        temperature=0.5,
+        temperature=0.35,
         text={
             "format": {
                 "type": "json_schema",

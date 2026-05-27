@@ -25,8 +25,8 @@ export type WorkflowStepDef = {
 export const WORKFLOW_STEPS: WorkflowStepDef[] = [
   {
     id: "designType",
-    label: "Design type",
-    hint: "Choose the room or module you want to design.",
+    label: "Materials (optional)",
+    hint: "Pick catalog finishes or skip — room type comes after you add a floor plan.",
   },
   {
     id: "floorPlan",
@@ -36,7 +36,7 @@ export const WORKFLOW_STEPS: WorkflowStepDef[] = [
   {
     id: "planSetup",
     label: "Plan setup",
-    hint: "Set north on the drawing and pick the room if the plan has several.",
+    hint: "Pick the room on your plan — north and wall openings are detected automatically.",
   },
   {
     id: "wallLayout",
@@ -46,7 +46,7 @@ export const WORKFLOW_STEPS: WorkflowStepDef[] = [
   {
     id: "preferences",
     label: "Style & budget",
-    hint: "Answer follow-ups in chat until the brief is complete.",
+    hint: "Optional — add style, budget, or mood in step 1 notes; otherwise we pick defaults automatically.",
   },
   {
     id: "styleRefs",
@@ -76,12 +76,18 @@ export type WorkflowSnapshot = {
   canGenerate: boolean;
 };
 
+function previousStepsDone(stepIndex: number, doneMap: Record<WorkflowStepId, boolean>): boolean {
+  if (stepIndex <= 0) return true;
+  return WORKFLOW_STEPS.slice(0, stepIndex).every((s) => doneMap[s.id]);
+}
+
 export function computeWorkflow(input: {
   brief: Record<string, unknown>;
   floorplanImageCount: number;
   floorplanText: string;
   detectedRoomCount: number;
   skipWallLayout: boolean;
+  skipDesignMaterials: boolean;
   isComplete: boolean;
   designsCount: number;
   isGenerating: boolean;
@@ -92,22 +98,24 @@ export function computeWorkflow(input: {
     floorplanText,
     detectedRoomCount,
     skipWallLayout,
+    skipDesignMaterials,
     isComplete,
     designsCount,
     isGenerating,
   } = input;
 
-  const hasSpace = Boolean(brief.space_type && String(brief.space_type).trim());
+  const mats = brief.material_preferences;
+  const hasMaterialPref = Array.isArray(mats) && mats.some((m) => String(m).trim());
+
   const hasFloorPlanImage = floorplanImageCount > 0;
   const hasFloorPlanText = floorplanText.trim().length >= 12;
   const hasFloorPlan = hasFloorPlanImage || hasFloorPlanText;
 
-  const needsRoomPick = hasFloorPlanImage && detectedRoomCount > 1;
+  const needsRoomPick = hasFloorPlanImage && detectedRoomCount >= 1;
   const roomSelected =
-    !needsRoomPick ||
-    Boolean(brief.selected_room_id && String(brief.selected_room_id).trim());
+    !needsRoomPick || Boolean(brief.selected_room_id && String(brief.selected_room_id).trim());
 
-  const planSetupApplies = hasFloorPlanImage;
+  const planSetupApplies = hasFloorPlan;
   const planSetupDone = !planSetupApplies || roomSelected;
 
   const walls = (brief.wall_assignments as Record<string, string[]>) || {};
@@ -123,9 +131,9 @@ export function computeWorkflow(input: {
   const resultsDone = generateDone;
 
   const doneMap: Record<WorkflowStepId, boolean> = {
-    designType: hasSpace,
+    designType: skipDesignMaterials || hasMaterialPref,
     floorPlan: hasFloorPlan,
-    planSetup: !planSetupApplies || (planSetupDone && hasFloorPlan),
+    planSetup: !planSetupApplies || planSetupDone,
     wallLayout: wallLayoutDone,
     preferences: preferencesDone,
     styleRefs: styleRefsDone,
@@ -151,8 +159,9 @@ export function computeWorkflow(input: {
 
   const steps: WorkflowStepView[] = WORKFLOW_STEPS.map((def, i) => {
     const done = doneMap[def.id];
+    const unlocked = def.id === "designType" || previousStepsDone(i, doneMap);
     let status: StepStatus;
-    if (!hasSpace && def.id !== "designType") {
+    if (!unlocked) {
       status = "locked";
     } else if (done) {
       status = "done";

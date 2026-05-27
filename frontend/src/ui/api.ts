@@ -36,7 +36,60 @@ export type DesignVariant = {
 
 export type DesignsResponse = { currency?: string; designs: DesignVariant[] };
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
+export type CatalogMaterial = {
+  id: string;
+  name: string;
+  unit: string;
+  unit_price: number;
+};
+
+/** local | production — which URL to use when VITE_API_BASE is not set */
+export type ApiTarget = "local" | "production";
+
+function stripTrailingSlash(url: string): string {
+  return url.replace(/\/$/, "");
+}
+
+/** Resolve backend URL: explicit VITE_API_BASE wins, else local vs production from env. */
+export function resolveApiBase(): string {
+  const explicit = (import.meta.env.VITE_API_BASE as string | undefined)?.trim();
+  if (explicit) return stripTrailingSlash(explicit);
+
+  const target = ((import.meta.env.VITE_API_TARGET as string | undefined) ?? "local").toLowerCase();
+  const local = stripTrailingSlash(
+    (import.meta.env.VITE_API_BASE_LOCAL as string | undefined)?.trim() || "http://localhost:8000"
+  );
+  const production = (import.meta.env.VITE_API_BASE_PRODUCTION as string | undefined)?.trim() || "";
+
+  if (target === "production" || target === "prod") {
+    if (!production) {
+      console.warn("VITE_API_TARGET=production but VITE_API_BASE_PRODUCTION is empty; falling back to local.");
+      return local;
+    }
+    return stripTrailingSlash(production);
+  }
+  return local;
+}
+
+export function activeApiTarget(): ApiTarget {
+  const explicit = (import.meta.env.VITE_API_BASE as string | undefined)?.trim();
+  if (explicit) {
+    return explicit.includes("localhost") || explicit.includes("127.0.0.1") ? "local" : "production";
+  }
+  const t = ((import.meta.env.VITE_API_TARGET as string | undefined) ?? "local").toLowerCase();
+  return t === "production" || t === "prod" ? "production" : "local";
+}
+
+const API_BASE = resolveApiBase();
+
+export async function fetchCatalogMaterials(): Promise<CatalogMaterial[]> {
+  const res = await fetch(`${API_BASE}/api/catalog/materials`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+  return (await res.json()) as CatalogMaterial[];
+}
 
 export async function postIntake(params: {
   brief: Record<string, unknown>;

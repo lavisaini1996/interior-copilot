@@ -1,6 +1,21 @@
-import React, { useMemo, useState } from "react";
-import { ChatMessage, DesignVariant, ImagePayload, postDesigns, postIntake } from "./api";
-import { canPlaceOnWall, type WallAssignments as PlacementWalls } from "./wallPlacement";
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  ChatMessage,
+  DesignVariant,
+  fetchCatalogMaterials,
+  ImagePayload,
+  postDesigns,
+  postIntake,
+  type CatalogMaterial,
+} from "./api";
+import {
+  canPlaceOnWall,
+  normalizeDimsToMetres,
+  resolveRoomDims,
+  type WallAssignments as PlacementWalls,
+} from "./wallPlacement";
+import { SpeechInput } from "./SpeechInput";
+import { intakeAssistantTail } from "./intakeMessages";
 import { computeWorkflow, WorkflowSection, WorkflowStepper } from "./workflow";
 
 type WallId = "north" | "south" | "east" | "west";
@@ -358,16 +373,6 @@ const MODULAR_SERVICE_TYPES = [
   "Paneling",
 ] as const;
 
-const MATERIAL_FINISH_OPTIONS = [
-  { label: "Stone", value: "stone" },
-  { label: "Wood veneer (oak/walnut)", value: "wood" },
-  { label: "Laminate", value: "laminate" },
-  { label: "Acrylic finish", value: "acrylic" },
-  { label: "Duco / PU paint", value: "pu" },
-  { label: "Wallpaper", value: "wallpaper" },
-  { label: "Texture paint", value: "texture paint" },
-] as const;
-
 function labelForItem(value: string, items: WallItem[]): string {
   return items.find((i) => i.value === value)?.label ?? value;
 }
@@ -420,10 +425,16 @@ function WallLayout(props: {
     { id: "west", label: "West" },
   ];
 
+  const roomDims = resolveRoomDims(brief);
+  const hasRoomDims = Boolean(roomDims.lengthM && roomDims.widthM);
+
   return (
     <div>
       <div className="wlHeader">
-        <div className="muted">Click a wall to place items. Room: <strong>{roomLabel}</strong></div>
+        <div className="muted">
+          Click a wall to place items. Room: <strong>{roomLabel}</strong>. Generated images will lock furniture and
+          doors/windows to these N/S/E/W walls.
+        </div>
         <button className="btn secondary" onClick={clearAll} disabled={disabled}>
           Reset all walls
         </button>
@@ -519,6 +530,12 @@ function WallLayout(props: {
 
       {activeWall ? (
         <div className="wlEditor">
+          {!hasRoomDims ? (
+            <p className="muted" style={{ marginBottom: 8 }}>
+              Room size not read from the plan — item limits use conservative estimates. Select a room with dimensions
+              for accurate fit checks.
+            </p>
+          ) : null}
           <div className="wlEditorHead">
             <div className="smallTitle">Place on {activeWall.toUpperCase()} wall</div>
             <div>
@@ -543,14 +560,16 @@ function WallLayout(props: {
                       assignments,
                       openings: wallOpenings as PlacementWalls,
                     });
+              const blocked = !selected && !fit.ok;
               return (
                 <button
                   key={it.value}
-                  className={`wlItemBtn ${selected ? "on" : ""} ${!selected && !fit.ok ? "blocked" : ""}`}
-                  onClick={() => toggle(activeWall, it.value)}
-                  disabled={disabled}
+                  className={`wlItemBtn ${selected ? "on" : ""} ${blocked ? "blocked" : ""}`}
+                  onClick={() => !blocked && toggle(activeWall, it.value)}
+                  disabled={disabled || blocked}
                   type="button"
-                  title={!selected && !fit.ok ? fit.message : undefined}
+                  title={blocked ? fit.message : selected ? "Remove from this wall" : undefined}
+                  aria-disabled={blocked || disabled}
                 >
                   {it.label}
                 </button>
@@ -569,13 +588,15 @@ export function App() {
     {
       role: "assistant",
       content:
-        "Tell me about the space and what you want. Upload a floor plan (image or text). Pricing is in Indian Rupees (INR). After you attach a plan image, I will ask follow-ups for room size, style, materials, and budget before generating designs.",
+        "Upload a floor plan (step 2), then pick your room in plan setup. Step 1 materials are optional. Pricing is in INR. I will ask follow-ups for style and budget before generating catalog-backed designs.",
     },
   ]);
   const [input, setInput] = useState("");
   const [pendingQuestions, setPendingQuestions] = useState<string[]>([]);
   const [isComplete, setIsComplete] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
+  const [processingFloorplan, setProcessingFloorplan] = useState(false);
+  const [syncingPlan, setSyncingPlan] = useState(false);
   const [designs, setDesigns] = useState<DesignVariant[]>([]);
   const [designCurrency, setDesignCurrency] = useState("INR");
   const [genStep, setGenStep] = useState<
@@ -586,6 +607,9 @@ export function App() {
   const [floorplanRefs, setFloorplanRefs] = useState<UploadedRef[]>([]);
   const [floorplanText, setFloorplanText] = useState("");
   const [skipWallLayout, setSkipWallLayout] = useState(false);
+  const [skipDesignMaterials, setSkipDesignMaterials] = useState(false);
+  const [catalogMaterials, setCatalogMaterials] = useState<CatalogMaterial[]>([]);
+  const [catalogMaterialsError, setCatalogMaterialsError] = useState<string | null>(null);
 
   const isGenerating =
     isBusy && genStep !== "idle" && genStep !== "done" && genStep !== "error";
@@ -619,6 +643,52 @@ export function App() {
     return Array.isArray(rooms) ? rooms : [];
   }, [brief]);
 
+  const selectedRoomIdForSelect = useMemo(() => {
+    const rooms = detectedRooms;
+    const rawId = String((brief as any)?.selected_room_id ?? "").trim();
+    if (rawId && rooms.some((r: any) => String(r?.id) === rawId)) return rawId;
+    const name = String((brief as any)?.selected_room_name ?? "").trim();
+    if (name) {
+      const byName = rooms.find((r: any) => String(r?.name ?? "").trim().toLowerCase() === name.toLowerCase());
+      if (byName?.id) return String(byName.id);
+    }
+    return rawId;
+  }, [brief, detectedRooms]);
+
+  const hasFloorPlan = floorplanRefs.length > 0 || floorplanText.trim().length >= 12;
+
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const mats = await fetchCatalogMaterials();
+        if (!cancelled) {
+          setCatalogMaterials(mats);
+          setCatalogMaterialsError(null);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setCatalogMaterialsError(e instanceof Error ? e.message : String(e));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const selectedMaterialNames = useMemo(() => {
+    const m = brief.material_preferences;
+    return Array.isArray(m) ? m.map((x) => String(x)) : [];
+  }, [brief.material_preferences]);
+
+  const onCatalogMaterialsChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const selected = Array.from(e.target.selectedOptions, (opt) => opt.value);
+    setBrief((b) => ({ ...b, material_preferences: selected }));
+    setSkipDesignMaterials(false);
+  };
+
   const workflow = useMemo(
     () =>
       computeWorkflow({
@@ -627,6 +697,7 @@ export function App() {
         floorplanText,
         detectedRoomCount: detectedRooms.length,
         skipWallLayout,
+        skipDesignMaterials,
         isComplete,
         designsCount: designs.length,
         isGenerating,
@@ -637,6 +708,7 @@ export function App() {
       floorplanText,
       detectedRooms.length,
       skipWallLayout,
+      skipDesignMaterials,
       isComplete,
       designs.length,
       isGenerating,
@@ -659,6 +731,7 @@ export function App() {
   async function syncFloorplanIntake(nextBrief: Record<string, unknown>) {
     if (!floorplanRefs.length) return;
     setError(null);
+    setSyncingPlan(true);
     setIsBusy(true);
     try {
       const fpPayload: ImagePayload[] = floorplanRefs.map((r) => ({
@@ -682,9 +755,33 @@ export function App() {
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {
+      setSyncingPlan(false);
       setIsBusy(false);
     }
   }
+
+  const applySelectedRoom = (room: { id?: string; name?: string; length_m?: number; width_m?: number } | null) => {
+    const rawLn =
+      room?.length_m != null ? Number(room.length_m) : Number((brief as any).room_length_m) || null;
+    const rawWd =
+      room?.width_m != null ? Number(room.width_m) : Number((brief as any).room_width_m) || null;
+    const { lengthM, widthM } = normalizeDimsToMetres(
+      rawLn != null && Number.isFinite(rawLn) ? rawLn : null,
+      rawWd != null && Number.isFinite(rawWd) ? rawWd : null,
+    );
+    const nextBrief: Record<string, unknown> = {
+      ...brief,
+      selected_room_id: room?.id ?? null,
+      selected_room_name: room?.name ?? null,
+      space_type: room?.name ? String(room.name).toLowerCase() : null,
+      room_length_m: lengthM ?? (brief as any).room_length_m,
+      room_width_m: widthM ?? (brief as any).room_width_m,
+      wall_assignments: { ...EMPTY_WALL_ASSIGNMENTS },
+      wall_openings: { ...EMPTY_WALL_ASSIGNMENTS },
+    };
+    setBrief(nextBrief);
+    if (floorplanRefs.length && room?.id) void syncFloorplanIntake(nextBrief);
+  };
 
   const styleImages: ImagePayload[] = useMemo(
     () => styleRefs.map((r) => ({ mime_type: r.mime_type, data_base64: r.data_base64 })),
@@ -730,6 +827,7 @@ export function App() {
     if (!converted.length) return;
     const newFp = converted.slice(0, 1);
     setFloorplanRefs(newFp);
+    setProcessingFloorplan(true);
 
     const fpPayload: ImagePayload[] = newFp.map((r) => ({ mime_type: r.mime_type, data_base64: r.data_base64 }));
     const stylePayload: ImagePayload[] = styleRefs.map((r) => ({ mime_type: r.mime_type, data_base64: r.data_base64 }));
@@ -743,40 +841,28 @@ export function App() {
     setDesigns([]);
     try {
       const resp = await postIntake({
-        brief,
+        brief: {
+          ...brief,
+          rooms_detected: [],
+          selected_room_id: null,
+          selected_room_name: null,
+          wall_assignments: { ...EMPTY_WALL_ASSIGNMENTS },
+          wall_openings: { ...EMPTY_WALL_ASSIGNMENTS },
+        },
         chat_history: nextChat,
         context_images: contextForIntake,
         floorplan_images: fpPayload,
         max_questions: 4,
       });
       setBrief(resp.updated_brief as Record<string, unknown>);
-      setPendingQuestions(resp.questions);
+      setPendingQuestions([]);
       setIsComplete(resp.is_complete);
-
-      let tail: ChatMessage[];
-      if (resp.questions.length > 0) {
-        tail = [
-          {
-            role: "assistant",
-            content: `A few quick follow-ups:\n${resp.questions.map((q) => `- ${q}`).join("\n")}`,
-          },
-        ];
-      } else if (resp.is_complete) {
-        tail = [
-          {
-            role: "assistant",
-            content:
-              "Brief is complete. Add any last notes in chat if you like, then click Generate designs (catalog items, INR pricing).",
-          },
-        ];
-      } else {
-        tail = [{ role: "assistant", content: "I’m close — add any extra preferences or constraints in chat." }];
-      }
-      setChat([...nextChat, ...tail]);
+      setChat([...nextChat, ...intakeAssistantTail(resp.is_complete, true)]);
     } catch (e: any) {
       setError(e?.message ?? String(e));
       setFloorplanRefs([]);
     } finally {
+      setProcessingFloorplan(false);
       setIsBusy(false);
     }
   }
@@ -800,29 +886,9 @@ export function App() {
         max_questions: 4,
       });
       setBrief(resp.updated_brief as Record<string, unknown>);
-      setPendingQuestions(resp.questions);
+      setPendingQuestions([]);
       setIsComplete(resp.is_complete);
-
-      let tail: ChatMessage[];
-      if (resp.questions.length > 0) {
-        tail = [
-          {
-            role: "assistant",
-            content: `A few quick follow-ups:\n${resp.questions.map((q) => `- ${q}`).join("\n")}`,
-          },
-        ];
-      } else if (resp.is_complete) {
-        tail = [
-          {
-            role: "assistant",
-            content:
-              "Brief is complete. When your floor plan is attached (image or text), click Generate designs for 2–3 INR-priced options.",
-          },
-        ];
-      } else {
-        tail = [{ role: "assistant", content: "I’m close — add any extra preferences or constraints." }];
-      }
-      setChat([...nextChat, ...tail]);
+      setChat([...nextChat, ...intakeAssistantTail(resp.is_complete, floorplanImages.length > 0)]);
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {
@@ -891,7 +957,7 @@ export function App() {
       {
         role: "assistant",
         content:
-          "Tell me about the space and what you want. Upload a floor plan (image or text). Pricing is in Indian Rupees (INR). After you attach a plan image, I will ask follow-ups for room size, style, materials, and budget before generating designs.",
+          "Upload a floor plan (step 2), then pick your room in plan setup. Step 1 materials are optional. Pricing is in INR. I will ask follow-ups for style and budget before generating catalog-backed designs.",
       },
     ]);
     setPendingQuestions([]);
@@ -904,7 +970,10 @@ export function App() {
     setStyleRefs([]);
     setFloorplanRefs([]);
     setFloorplanText("");
+    setProcessingFloorplan(false);
+    setSyncingPlan(false);
     setSkipWallLayout(false);
+    setSkipDesignMaterials(false);
   }
 
   return (
@@ -970,61 +1039,60 @@ export function App() {
       </section>
 
       <div className="wfFlow">
-        <WorkflowSection stepId="designType" steps={workflow.steps} title="Design type & material">
+        <WorkflowSection
+          stepId="designType"
+          steps={workflow.steps}
+          title="Material preference (optional)"
+          footer={
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() => setSkipDesignMaterials(true)}
+              disabled={isBusy || skipDesignMaterials}
+            >
+              Continue without materials
+            </button>
+          }
+        >
+          <p className="muted" style={{ marginBottom: 12 }}>
+            Optional step. Choose finishes from the catalog and/or describe preferences by voice. Pick your room from the
+            floor plan in step 3.
+          </p>
+
           <div className="uploadRow" style={{ marginTop: 0 }}>
             <div className="uploadMeta">
-              <div className="smallTitle">What do you want to design?</div>
-              <div className="muted">Pick the service/module type (we’ll design using catalog items).</div>
+              <div className="smallTitle">Materials from catalog</div>
+              <div className="muted">Hold Ctrl (Windows) or ⌘ (Mac) to select multiple. Names only.</div>
             </div>
             <select
-              className="select"
-              value={String(brief.space_type ?? "")}
-              onChange={(e) => setBrief((b) => ({ ...b, space_type: e.target.value || null }))}
-              disabled={isBusy}
+              className="select catalogMatSelect"
+              multiple
+              size={8}
+              value={selectedMaterialNames}
+              onChange={onCatalogMaterialsChange}
+              disabled={isBusy || !catalogMaterials.length}
+              aria-label="Catalog materials"
             >
-              <option value="">Select type…</option>
-              <optgroup label="Rooms">
-                {FULL_ROOM_TYPES.map((t) => (
-                  <option key={`room-${t}`} value={t.toLowerCase()}>
-                    {t}
-                  </option>
-                ))}
-              </optgroup>
-              <optgroup label="Modular services / modules">
-                {MODULAR_SERVICE_TYPES.map((t) => (
-                  <option key={`mod-${t}`} value={t.toLowerCase()}>
-                    {t}
-                  </option>
-                ))}
-              </optgroup>
-            </select>
-          </div>
-
-          <div className="uploadRow">
-            <div className="uploadMeta">
-              <div className="smallTitle">Material / finish preference</div>
-              <div className="muted">This guides materials and finishes (INR pricing still uses catalog only).</div>
-            </div>
-            <select
-              className="select"
-              value={String((brief.material_preferences as any)?.[0] ?? "")}
-              onChange={(e) =>
-                setBrief((b) => ({
-                  ...b,
-                  material_preferences: e.target.value ? [e.target.value] : [],
-                }))
-              }
-              disabled={isBusy}
-            >
-              <option value="">Select material…</option>
-              {MATERIAL_FINISH_OPTIONS.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.label}
+              {catalogMaterials.map((m) => (
+                <option key={m.id} value={m.name}>
+                  {m.name}
                 </option>
               ))}
             </select>
           </div>
+          {catalogMaterialsError ? (
+            <p className="pill warn" style={{ marginTop: 8 }}>
+              Could not load catalog: {catalogMaterialsError}
+            </p>
+          ) : null}
 
+          <SpeechInput
+            label="Speak or type preferences (optional)"
+            placeholder="e.g. Bedroom ground floor, modern minimal, ₹5 lakh budget, elegant mood…"
+            value={String(brief.notes ?? "")}
+            onChange={(text) => setBrief((b) => ({ ...b, notes: text }))}
+            disabled={isBusy}
+          />
         </WorkflowSection>
 
         <WorkflowSection stepId="floorPlan" steps={workflow.steps} title="Floor plan">
@@ -1038,12 +1106,19 @@ export function App() {
                 type="file"
                 accept="image/*"
                 onChange={(e) => onPickFloorplan(e.target.files)}
-                disabled={isBusy}
+                disabled={isBusy || processingFloorplan}
               />
               Add floor plan image
             </label>
             {floorplanRefs.length ? (
-              <button className="btn secondary" onClick={() => setFloorplanRefs([])} disabled={isBusy}>
+              <button
+                className="btn secondary"
+                onClick={() => {
+                  setFloorplanRefs([]);
+                  setProcessingFloorplan(false);
+                }}
+                disabled={isBusy || processingFloorplan}
+              >
                 Clear
               </button>
             ) : null}
@@ -1056,7 +1131,7 @@ export function App() {
                   <button
                     className="thumbX"
                     onClick={() => setFloorplanRefs((prev) => prev.filter((x) => x.id !== r.id))}
-                    disabled={isBusy}
+                    disabled={isBusy || processingFloorplan}
                     aria-label={`Remove ${r.name}`}
                   >
                     ×
@@ -1065,107 +1140,92 @@ export function App() {
               ))}
             </div>
           ) : null}
+          {processingFloorplan ? (
+            <div className="planSyncLoader fpProcessingLoader" role="status" aria-live="polite">
+              <div className="spinner" aria-hidden="true" />
+              <div>
+                <div className="planSyncLoaderTitle">Reading your floor plan…</div>
+                <div className="muted planSyncLoaderSub">
+                  Detecting rooms and layout. The room dropdown in Plan setup will appear when this finishes.
+                </div>
+              </div>
+            </div>
+          ) : null}
           <textarea
             className="input"
             placeholder="Floor plan text (optional). Example: Room 4.2m x 3.6m, door on south wall, window on east."
             value={floorplanText}
             onChange={(e) => setFloorplanText(e.target.value)}
             rows={3}
-            disabled={isBusy}
+            disabled={isBusy || processingFloorplan}
             style={{ marginTop: 12 }}
           />
         </WorkflowSection>
 
         <WorkflowSection stepId="planSetup" steps={workflow.steps} title="Plan setup">
+          {!hasFloorPlan ? (
+            <p className="muted">Add a floor plan in step 2 first, then pick a room here.</p>
+          ) : null}
+
+          {hasFloorPlan && processingFloorplan && detectedRooms.length === 0 ? (
+            <div className="planSyncLoader" role="status" aria-live="polite" style={{ marginBottom: 16 }}>
+              <div className="spinner" aria-hidden="true" />
+              <div>
+                <div className="planSyncLoaderTitle">Processing floor plan…</div>
+                <div className="muted planSyncLoaderSub">Room list loading — please wait.</div>
+              </div>
+            </div>
+          ) : null}
+
+          {hasFloorPlan && detectedRooms.length >= 1 ? (
+            <div style={{ marginTop: 0, marginBottom: 16 }}>
+              <div className="uploadRow">
+                <div className="uploadMeta">
+                  <div className="smallTitle">Select room from floor plan</div>
+                  <div className="muted">Choose which room on the plan you want to design.</div>
+                </div>
+                <select
+                  className="select"
+                  value={selectedRoomIdForSelect}
+                  onChange={(e) => {
+                    const id = e.target.value || null;
+                    const room = detectedRooms.find((x: any) => String(x?.id) === String(id)) ?? null;
+                    applySelectedRoom(room as { id?: string; name?: string; length_m?: number; width_m?: number });
+                  }}
+                  disabled={isBusy || syncingPlan}
+                >
+                  <option value="">Select room…</option>
+                  {detectedRooms.map((r: any) => (
+                    <option key={String(r.id)} value={String(r.id)}>
+                      {String(r.name)}
+                      {r.length_m && r.width_m ? ` (${r.length_m}m × ${r.width_m}m)` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {syncingPlan ? (
+                <div className="planSyncLoader" role="status" aria-live="polite">
+                  <div className="spinner" aria-hidden="true" />
+                  <div>
+                    <div className="planSyncLoaderTitle">Reading this room on the plan…</div>
+                    <div className="muted planSyncLoaderSub">
+                      Detecting doors and windows on each wall. Wall layout updates when this finishes.
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           {!floorplanRefs.length ? (
-            <p className="muted">No plan image — optional. Upload an image in step 2 for north arrow and room picker.</p>
+            <p className="muted">No plan image — optional. Upload an image in step 2 for automatic room and north detection.</p>
           ) : null}
           {floorplanRefs.length ? (
-            <div className="fpNorthPanel">
-              <div className="smallTitle">Plan north — doors &amp; windows per wall</div>
-              <div className="muted" style={{ marginBottom: 8 }}>
-                Rotate the compass so its <strong>top point</strong> aims at north on your drawing (degrees clockwise from
-                the top of the image). Cardinal directions (N/S/E/W) appear in the label below and in Wall layout — not on
-                the compass graphic. After you pick a room, we scan the plan and list doors and windows per wall.
-              </div>
-              <div className="fpNorthRow">
-                <div className="fpNorthPreview">
-                  <img className="fpNorthImg" src={floorplanRefs[0].preview_data_url} alt="Floor plan orientation" />
-                  <img
-                    className="fpNorthCompass"
-                    src="/compass-rose.svg"
-                    alt=""
-                    style={{
-                      transform: `rotate(${Number((brief as any).floorplan_north_clockwise_deg ?? 0)}deg)`,
-                    }}
-                  />
-                </div>
-                <div className="fpNorthControl">
-                  <label className="muted" htmlFor="fpNorthRange">
-                    North from image top (clockwise): {Number((brief as any).floorplan_north_clockwise_deg ?? 0)}°
-                  </label>
-                  <input
-                    id="fpNorthRange"
-                    type="range"
-                    min={0}
-                    max={359}
-                    value={Number((brief as any).floorplan_north_clockwise_deg ?? 0)}
-                    onChange={(e) => {
-                      const v = Number(e.target.value);
-                      setBrief((b) => ({ ...b, floorplan_north_clockwise_deg: v }));
-                    }}
-                    onPointerUp={(e) => {
-                      const v = Number((e.currentTarget as HTMLInputElement).value);
-                      setBrief((prev) => {
-                        const merged = { ...prev, floorplan_north_clockwise_deg: v };
-                        queueMicrotask(() => void syncFloorplanIntake(merged as Record<string, unknown>));
-                        return merged;
-                      });
-                    }}
-                    disabled={isBusy}
-                  />
-                </div>
-              </div>
-            </div>
+            <p className="muted" style={{ marginTop: 8 }}>
+              Plan north and doors/windows are detected automatically when you select a room. Check step 4 for hallway,
+              closet, and balcony openings on each wall.
+            </p>
           ) : null}
-
-          {detectedRooms.length > 1 ? (
-            <div className="uploadRow">
-              <div className="uploadMeta">
-                <div className="smallTitle">Select room from floor plan</div>
-                <div className="muted">If you uploaded a whole-house plan, pick the room you want to design.</div>
-              </div>
-              <select
-                className="select"
-                value={String((brief as any)?.selected_room_id ?? "")}
-                onChange={(e) => {
-                  void (async () => {
-                    const id = e.target.value || null;
-                    const room = detectedRooms.find((x: any) => String(x?.id) === String(id));
-                    const nextBrief: Record<string, unknown> = {
-                      ...brief,
-                      selected_room_id: id,
-                      selected_room_name: room?.name ?? null,
-                      room_length_m: room?.length_m ?? (brief as any).room_length_m,
-                      room_width_m: room?.width_m ?? (brief as any).room_width_m,
-                    };
-                    setBrief(nextBrief);
-                    if (floorplanRefs.length) await syncFloorplanIntake(nextBrief);
-                  })();
-                }}
-                disabled={isBusy}
-              >
-                <option value="">Select room…</option>
-                {detectedRooms.map((r: any) => (
-                  <option key={String(r.id)} value={String(r.id)}>
-                    {String(r.name)}
-                    {r.length_m && r.width_m ? ` (${r.length_m}m × ${r.width_m}m)` : ""}
-                  </option>
-                ))}
-              </select>
-            </div>
-          ) : null}
-
 
         </WorkflowSection>
 
@@ -1179,8 +1239,23 @@ export function App() {
           >
             Continue without wall layout
           </button>
-          {floorplanRefs.length || brief.space_type ? (
+          {hasFloorPlan && !(brief as any)?.selected_room_id ? (
+            <p className="muted">Select a room in Plan setup to load doors and windows on each wall.</p>
+          ) : null}
+          {hasFloorPlan && (brief as any)?.selected_room_id && syncingPlan ? (
+            <div className="planSyncLoader wlSyncLoader" role="status" aria-live="polite">
+              <div className="spinner" aria-hidden="true" />
+              <div>
+                <div className="planSyncLoaderTitle">
+                  Updating wall layout for {(brief as any).selected_room_name || "this room"}…
+                </div>
+                <div className="muted planSyncLoaderSub">North, south, east, and west openings will refresh shortly.</div>
+              </div>
+            </div>
+          ) : null}
+          {hasFloorPlan && (brief as any)?.selected_room_id && !syncingPlan ? (
             <WallLayout
+              key={String((brief as any).selected_room_id)}
               brief={brief}
               assignments={
                 ((brief as any).wall_assignments as WallAssignments) || { ...EMPTY_WALL_ASSIGNMENTS }
@@ -1198,12 +1273,17 @@ export function App() {
                 }))
               }
             />
-          ) : (
-            <p className="muted">Complete step 2 (floor plan) to place items on walls.</p>
-          )}
+          ) : null}
+          {!hasFloorPlan ? (
+            <p className="muted">Add a floor plan in step 2 to place items on walls.</p>
+          ) : null}
         </WorkflowSection>
 
-        <WorkflowSection stepId="preferences" steps={workflow.steps} title="Style & budget (chat)">
+        <WorkflowSection stepId="preferences" steps={workflow.steps} title="Style & budget (optional)">
+          <p className="muted" style={{ marginBottom: 10 }}>
+            No follow-up questions — add preferences in step 1 notes or optional chat below. Anything missing is filled
+            automatically (random style, budget band, and mood).
+          </p>
           <div className="chat">
             {chat.map((m, idx) => (
               <div key={idx} className={`msg ${m.role}`}>
@@ -1216,7 +1296,7 @@ export function App() {
           <div className="composer">
             <textarea
               className="input"
-              placeholder="Your answer…"
+              placeholder="Optional: style, budget (INR), mood, room name…"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               rows={3}
@@ -1241,11 +1321,7 @@ export function App() {
             <div className={`pill ${isComplete ? "ok" : "warn"}`}>
               {isComplete ? "Brief complete" : "Needs more info"}
             </div>
-            {pendingQuestions.length ? (
-              <div className="pill neutral">{pendingQuestions.length} follow-up question(s)</div>
-            ) : (
-              <div className="pill neutral">No pending questions</div>
-            )}
+            <div className="pill neutral">Preferences auto-filled when not specified</div>
             {isBusy ? <div className="pill neutral">Working…</div> : null}
           </div>
         </WorkflowSection>

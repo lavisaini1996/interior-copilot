@@ -9,6 +9,7 @@ Public surface mirrors the per-provider client modules:
   - env_config()
   - extract_rooms_from_floorplan(...)
   - extract_room_dimensions_from_floorplan(...)
+  - extract_plan_north_from_floorplan(...)
   - extract_wall_openings_from_floorplan(...)
   - generate_next_questions(...)
   - generate_moodboard_prompts(...)
@@ -62,6 +63,10 @@ def extract_rooms_from_floorplan(**kwargs: Any) -> Any:
 
 def extract_room_dimensions_from_floorplan(**kwargs: Any) -> Any:
     return _resolve().extract_room_dimensions_from_floorplan(**kwargs)
+
+
+def extract_plan_north_from_floorplan(**kwargs: Any) -> Any:
+    return _resolve().extract_plan_north_from_floorplan(**kwargs)
 
 
 def extract_wall_openings_from_floorplan(**kwargs: Any) -> Any:

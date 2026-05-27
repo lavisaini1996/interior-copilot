@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import random
 import re
 import traceback
 from typing import Any, Dict, List
@@ -20,17 +21,21 @@ from backend.llm import (
     env_config,
     extract_rooms_from_floorplan,
     extract_room_dimensions_from_floorplan,
+    extract_plan_north_from_floorplan,
     extract_wall_openings_from_floorplan,
     generate_catalog_designs,
     generate_images,
     generate_moodboard_prompts,
-    generate_next_questions,
 )
 from backend.catalog import load_catalog
 from backend.http_errors import http_exception_from_llm_error
 from backend.wall_placement import (
+    build_mandatory_layout_block,
     enhance_image_prompt_for_compass,
+    enforce_wall_placement_in_prompt,
     format_placement_verification,
+    normalize_dims_to_metres,
+    WALL_ITEM_LABELS,
 )
 
 
@@ -133,18 +138,60 @@ def _north_deg_from_brief(brief: Dict[str, Any]) -> float:
         return 0.0
 
 
+def _merge_plan_north(brief: Dict[str, Any], extracted: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(extracted, dict):
+        return brief
+    try:
+        deg = float(extracted.get("north_clockwise_deg")) % 360.0
+    except (TypeError, ValueError):
+        return brief
+    out = dict(brief)
+    out["floorplan_north_clockwise_deg"] = deg
+    if extracted.get("has_north_indicator") is not None:
+        out["floorplan_north_has_indicator"] = bool(extracted.get("has_north_indicator"))
+    notes = extracted.get("notes")
+    if isinstance(notes, str) and notes.strip():
+        out["floorplan_north_notes"] = notes.strip()
+    return out
+
+
+def _reconcile_selected_room(brief: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep selected_room_id in sync with rooms_detected (match by id, then by name)."""
+    rooms = brief.get("rooms_detected") or []
+    if not isinstance(rooms, list) or not rooms:
+        return brief
+    sel_id = brief.get("selected_room_id")
+    sel_name = brief.get("selected_room_name")
+    if not sel_id and not sel_name:
+        return brief
+    if isinstance(sel_id, str) and sel_id.strip():
+        sid = sel_id.strip()
+        for r in rooms:
+            if isinstance(r, dict) and str(r.get("id") or "").strip() == sid:
+                out = dict(brief)
+                out["selected_room_id"] = sid
+                if not sel_name and r.get("name"):
+                    out["selected_room_name"] = str(r.get("name"))
+                return out
+    if isinstance(sel_name, str) and sel_name.strip():
+        target = sel_name.strip().lower()
+        for r in rooms:
+            if not isinstance(r, dict):
+                continue
+            rname = str(r.get("name") or "").strip()
+            if rname.lower() == target:
+                out = dict(brief)
+                out["selected_room_id"] = str(r.get("id") or "").strip() or None
+                out["selected_room_name"] = rname
+                return out
+    return brief
+
+
 def _room_target_for_openings(brief: Dict[str, Any]) -> tuple[str | None, str | None]:
     """Room id + name used to scope door/window extraction."""
     rooms = brief.get("rooms_detected") or []
     if not isinstance(rooms, list) or not rooms:
         return None, None
-    if len(rooms) == 1:
-        r0 = rooms[0]
-        if not isinstance(r0, dict):
-            return None, None
-        rid = str(r0.get("id") or "").strip() or None
-        rnm = str(r0.get("name") or "").strip() or None
-        return rid, rnm
     sel = brief.get("selected_room_id")
     if not isinstance(sel, str) or not sel.strip():
         return None, None
@@ -181,101 +228,12 @@ def _to_metres(value: float, unit: str | None) -> float | None:
     return value
 
 
-_WALL_ITEM_LABELS: Dict[str, str] = {
-    "bed": "bed",
-    "headboard": "upholstered headboard",
-    "wardrobe": "wardrobe",
-    "loft": "loft storage",
-    "bedside": "bedside table",
-    "dresser": "dresser",
-    "chest_of_drawers": "chest of drawers",
-    "tv_unit": "TV unit",
-    "study": "study desk",
-    "desk": "desk",
-    "wall_desk": "wall-mounted desk",
-    "chair": "office chair",
-    "reading_chair": "reading chair",
-    "bench": "bench",
-    "mirror": "mirror",
-    "wall_sconces": "wall sconces",
-    "art": "art / wall decor",
-    "planter": "planter",
-    "accent_wall": "accent wall / paneling",
-    "wallpaper": "wallpaper feature",
-    "sofa": "sofa",
-    "sectional": "sectional sofa",
-    "accent_chair": "accent chair",
-    "ottoman": "ottoman",
-    "coffee_table": "coffee table",
-    "side_table": "side table",
-    "console": "console",
-    "bookshelf": "bookshelf",
-    "sideboard": "sideboard / buffet",
-    "bar_cabinet": "bar cabinet",
-    "floor_lamp": "floor lamp",
-    "fireplace": "fireplace",
-    "base_cabinets": "base cabinets",
-    "wall_cabinets": "wall / upper cabinets",
-    "tall_unit": "tall unit / pantry",
-    "hob": "hob / cooktop",
-    "chimney": "chimney / hood",
-    "oven": "built-in oven",
-    "microwave": "microwave nook",
-    "sink": "sink",
-    "dishwasher": "dishwasher",
-    "fridge": "fridge",
-    "counter": "breakfast counter",
-    "peninsula": "peninsula",
-    "backsplash": "backsplash",
-    "open_shelving": "open shelving",
-    "water_purifier": "water purifier",
-    "vanity": "vanity / counter",
-    "wc": "WC",
-    "wall_wc": "wall-hung WC",
-    "shower": "shower / enclosure",
-    "bathtub": "bathtub",
-    "linen": "linen cupboard",
-    "niche": "recessed niche",
-    "towel_rack": "towel rack",
-    "glass_partition": "glass partition",
-    "wall_tile_feature": "feature wall tile",
-    "dining_table": "dining table",
-    "dining_chairs": "dining chairs",
-    "crockery": "crockery unit",
-    "wine_rack": "wine rack",
-    "pendant_light": "pendant light(s)",
-    "walkin": "walk-in wardrobe",
-    "shoe": "shoe storage",
-    "jewelry_safe": "jewelry / safe drawer",
-    "drawers": "pull-out drawers",
-    "rod": "hanging rod section",
-    "filing": "filing cabinet",
-    "pegboard": "pegboard",
-    "pooja_unit": "pooja unit / mandir",
-    "jali": "jali / lattice screen",
-    "storage": "drawer storage",
-    "wall_paneling": "wood paneling",
-    "lighting": "cove / spot lighting",
-    "coat_hooks": "coat hooks",
-    "vertical_garden": "vertical garden",
-    "seating": "seating bench",
-    "cafe_table": "café table",
-    "swing": "swing / jhoola",
-    "deck_floor": "deck flooring",
-    "washing_machine": "washing machine",
-    "dryer": "dryer",
-    "drying_rack": "drying rack",
-    "storage_cabinets": "storage cabinets",
-    "iron_board": "iron / fold-out board",
-}
-
-
 def _format_wall_layout_text(brief: Dict[str, Any]) -> str:
     walls = brief.get("wall_assignments") or {}
     if not isinstance(walls, dict):
         return ""
     rows: List[str] = []
-    label_for = lambda v: _WALL_ITEM_LABELS.get(str(v), str(v).replace("_", " "))
+    label_for = lambda v: WALL_ITEM_LABELS.get(str(v), str(v).replace("_", " "))
     for wall_id, wall_name in [("north", "NORTH"), ("south", "SOUTH"), ("east", "EAST"), ("west", "WEST")]:
         items = walls.get(wall_id) or []
         if isinstance(items, list) and items:
@@ -331,6 +289,26 @@ def _extract_dims_from_chat(chat_history: List[Dict[str, str]]) -> Dict[str, flo
     return None
 
 
+def _normalize_rooms_detected_dims(rooms: Any) -> List[Dict[str, Any]]:
+    if not isinstance(rooms, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for r in rooms:
+        if not isinstance(r, dict):
+            continue
+        row = dict(r)
+        ln = _num_or_none(row.get("length_m"))
+        wd = _num_or_none(row.get("width_m"))
+        if ln is not None and wd is not None:
+            ln2, wd2 = normalize_dims_to_metres(ln, wd)
+            if ln2 is not None:
+                row["length_m"] = ln2
+            if wd2 is not None:
+                row["width_m"] = wd2
+        out.append(row)
+    return out
+
+
 def _merge_extracted_floorplan_dims(brief: Dict[str, Any], extracted: Dict[str, Any]) -> Dict[str, Any]:
     """Fills L/W/H from a dedicated floor-plan vision read when the user has not already supplied both L and W."""
     out = dict(brief)
@@ -339,12 +317,144 @@ def _merge_extracted_floorplan_dims(brief: Dict[str, Any], extracted: Dict[str, 
     ln = _num_or_none(extracted.get("room_length_m"))
     wd = _num_or_none(extracted.get("room_width_m"))
     if ln and wd and not _dims_ok(out):
+        ln, wd = normalize_dims_to_metres(ln, wd)
         out["room_length_m"] = ln
         out["room_width_m"] = wd
     ch = _num_or_none(extracted.get("ceiling_height_m"))
     if ch and _num_or_none(out.get("ceiling_height_m")) is None:
         out["ceiling_height_m"] = ch
     return out
+
+
+_STYLE_HINTS: tuple[str, ...] = (
+    "modern minimal",
+    "modern",
+    "minimal",
+    "minimalist",
+    "japandi",
+    "scandinavian",
+    "industrial",
+    "indian contemporary",
+    "contemporary",
+    "traditional",
+    "boho",
+    "rustic",
+    "art deco",
+    "mid-century",
+)
+
+_MOOD_HINTS: tuple[str, ...] = (
+    "cozy",
+    "warm",
+    "calm",
+    "serene",
+    "elegant",
+    "vibrant",
+    "playful",
+    "bold",
+    "luxurious",
+    "airy",
+    "bright",
+    "moody",
+    "dramatic",
+    "fresh",
+    "minimal",
+    "rustic",
+    "natural",
+    "earthy",
+)
+
+_BUDGET_BANDS: tuple[str, ...] = (
+    "under ₹3 lakh",
+    "₹3–8 lakh",
+    "₹8–15 lakh",
+    "₹15 lakh+",
+)
+
+
+def _user_text_corpus(brief: Dict[str, Any], chat_history: List[Dict[str, str]]) -> str:
+    chunks: List[str] = [str(brief.get("notes") or "")]
+    mp = brief.get("material_preferences")
+    if isinstance(mp, list):
+        chunks.extend(str(x) for x in mp if isinstance(x, str) and x.strip())
+    for msg in chat_history or []:
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            chunks.append(str(msg.get("content") or ""))
+    return "\n".join(chunks).lower()
+
+
+def _autofill_missing_brief(
+    brief: Dict[str, Any],
+    chat_history: List[Dict[str, str]],
+    *,
+    has_floorplan_image: bool,
+) -> Dict[str, Any]:
+    """
+    Fill missing style / budget / mood / wardrobe from user text when present;
+    otherwise pick sensible random defaults. Never blocks on follow-up questions.
+    """
+    b: Dict[str, Any] = dict(brief)
+    corpus = _user_text_corpus(b, chat_history)
+
+    mp = b.get("material_preferences")
+    notes_str = str(b.get("notes") or "")
+    notes_l = notes_str.lower()
+    materials_present = isinstance(mp, list) and len(mp) > 0
+    if not materials_present and "materials:" not in notes_l:
+        notes_str = (notes_str + ("\n" if notes_str else "") + "Materials: designer's choice.").strip()
+        notes_l = notes_str.lower()
+        b["notes"] = notes_str
+
+    sd = b.get("style_direction")
+    if not (sd and isinstance(sd, str) and sd.strip()):
+        picked: str | None = None
+        for hint in _STYLE_HINTS:
+            if hint in corpus:
+                picked = hint
+                break
+        b["style_direction"] = picked or random.choice(_STYLE_HINTS)
+
+    bb = b.get("budget_band")
+    if not (bb and str(bb).strip()):
+        band: str | None = None
+        for msg in reversed(chat_history or []):
+            if not isinstance(msg, dict) or msg.get("role") != "user":
+                continue
+            text = str(msg.get("content") or "")
+            low = text.lower()
+            if any(kw in low for kw in ("lakh", "₹", "rs.", "rs ", "inr", "budget")):
+                band = text.strip()[:120]
+                break
+        b["budget_band"] = band or random.choice(_BUDGET_BANDS)
+
+    if "wardrobe style:" not in notes_l:
+        wardrobe_style: str | None = None
+        if "wardrobe" in corpus:
+            for hint in _STYLE_HINTS:
+                if hint in corpus:
+                    wardrobe_style = hint
+                    break
+        if not wardrobe_style:
+            wardrobe_style = random.choice(_STYLE_HINTS)
+        b["notes"] = (
+            notes_str + ("\n" if notes_str else "") + f"Wardrobe style: {wardrobe_style}."
+        ).strip()
+
+    mk = b.get("mood_keywords")
+    has_mood = isinstance(mk, list) and len([k for k in mk if isinstance(k, str) and k.strip()]) > 0
+    if not has_mood:
+        collected: List[str] = []
+        for hint in _MOOD_HINTS:
+            if hint in corpus and hint not in collected:
+                collected.append(hint)
+        if not collected:
+            collected = random.sample(list(_MOOD_HINTS), k=min(3, len(_MOOD_HINTS)))
+        b["mood_keywords"] = collected
+
+    if has_floorplan_image and not _dims_ok(b):
+        b["use_floorplan_image_for_scale_only"] = True
+
+    return b
 
 
 def _filter_manual_dimension_questions(questions: List[str], *, has_floorplan_image: bool) -> List[str]:
@@ -372,95 +482,15 @@ def _filter_manual_dimension_questions(questions: List[str], *, has_floorplan_im
     return out
 
 
-def _gate_intake_result(
-    updated_brief: Dict[str, Any],
-    model_questions: List[str],
-    max_questions: int,
+def _finalize_intake_brief(
+    brief: Dict[str, Any],
+    chat_history: List[Dict[str, str]],
     *,
-    has_floorplan_image: bool = False,
+    has_floorplan_image: bool,
 ) -> IntakeResponse:
-    """
-    Intake gate. Required to mark the brief complete:
-      1) Floor plan image uploaded
-      2) Room selected (when the plan has multiple rooms)
-      3) Interior style direction
-      4) Budget band (INR)
-      5) Wardrobe / module style direction  (stashed into notes as "Wardrobe style: ...")
-      6) Mood keywords (non-empty)
-    Materials are auto-defaulted to "designer's choice" if not provided.
-    We never pad with extra model-generated questions; the user only sees the
-    strictly missing items, max 4 at a time.
-    """
-    b: Dict[str, Any] = dict(updated_brief)
-    qs: List[str] = []
-    max_q = max(1, min(8, max_questions))
-
-    def push(msg: str) -> None:
-        if msg and msg not in qs:
-            qs.append(msg)
-
-    mp = b.get("material_preferences")
-    notes_str = str(b.get("notes") or "")
-    notes_l = notes_str.lower()
-    materials_present = isinstance(mp, list) and len(mp) > 0
-    materials_designer_choice = any(
-        x in notes_l for x in ("designer", "surprise", "any material", "no preference", "up to you")
-    )
-    if not materials_present and not materials_designer_choice:
-        notes_str = (notes_str + ("\n" if notes_str else "") + "Materials: designer's choice.").strip()
-        notes_l = notes_str.lower()
-        b["notes"] = notes_str
-
-    if not has_floorplan_image:
-        push("Please upload a floor plan image so I can read the room layout and dimensions.")
-
-    if has_floorplan_image:
-        rooms = b.get("rooms_detected") or []
-        if isinstance(rooms, list) and len(rooms) > 1 and not _selected_room_ok(b, has_floorplan_image=True):
-            push("Your floor plan has multiple rooms. Which room should I design?")
-
-    sd = b.get("style_direction")
-    has_style = bool(sd and isinstance(sd, str) and sd.strip())
-    if not has_style:
-        push(
-            "Which interior style should we follow (e.g. modern minimal, Indian contemporary, Japandi, industrial, Scandinavian)?"
-        )
-
-    bb = b.get("budget_band")
-    has_budget = bool(bb and str(bb).strip())
-    if not has_budget:
-        push("What is your approximate budget band in INR (for example: under ₹3 lakh, ₹3–8 lakh, ₹8–15 lakh, ₹15 lakh+)?")
-
-    has_wardrobe_style = "wardrobe style:" in notes_l
-    if not has_wardrobe_style:
-        push("What style direction do you prefer for the wardrobes? (e.g., modern, traditional, minimalist, rustic)")
-
-    mk = b.get("mood_keywords")
-    has_mood = isinstance(mk, list) and len([k for k in mk if isinstance(k, str) and k.strip()]) > 0
-    if not has_mood:
-        push("What mood or atmosphere do you want to create? (e.g., cozy, elegant, vibrant) Please provide keywords.")
-
-    missing: List[str] = []
-    if not has_floorplan_image:
-        missing.append("floorplan_image")
-    if not _selected_room_ok(b, has_floorplan_image=has_floorplan_image):
-        missing.append("room_selection")
-    if not has_style:
-        missing.append("style")
-    if not has_budget:
-        missing.append("budget")
-    if not has_wardrobe_style:
-        missing.append("wardrobe_style")
-    if not has_mood:
-        missing.append("mood")
-
-    is_complete = len(missing) == 0
-    if is_complete:
-        qs = []
-    elif not qs:
-        push("Please share what's missing so I can generate designs: " + ", ".join(missing) + ".")
-
-    return IntakeResponse(is_complete=is_complete, updated_brief=b, questions=qs[:max_q])
+    """Autofill missing preferences; never return follow-up questions."""
+    b = _autofill_missing_brief(brief, chat_history, has_floorplan_image=has_floorplan_image)
+    return IntakeResponse(is_complete=True, updated_brief=b, questions=[])
 
 
 def _assert_brief_ready_for_designs(brief: Dict[str, Any]) -> None:
@@ -578,6 +608,20 @@ def health() -> Dict[str, str]:
     return {"status": "ok", "llm_provider": active_provider()}
 
 
+@app.get("/api/catalog/materials")
+def catalog_materials() -> List[Dict[str, Any]]:
+    catalog = load_catalog()
+    return [
+        {
+            "id": m.id,
+            "name": m.name,
+            "unit": m.unit,
+            "unit_price": m.unit_price,
+        }
+        for m in catalog.materials_list()
+    ]
+
+
 @app.post("/api/intake", response_model=IntakeResponse)
 def intake(req: IntakeRequest) -> IntakeResponse:
     try:
@@ -585,13 +629,16 @@ def intake(req: IntakeRequest) -> IntakeResponse:
         merged_brief = _merge_brief(req.brief)
         floor_imgs = [img.model_dump() for img in req.floorplan_images]
 
-        if floor_imgs:
+        existing_rooms = merged_brief.get("rooms_detected") or []
+        has_rooms = isinstance(existing_rooms, list) and len(existing_rooms) > 0
+        if floor_imgs and not has_rooms:
             try:
                 rooms = extract_rooms_from_floorplan(cfg=cfg, floorplan_images=floor_imgs)
                 if isinstance(rooms, dict) and isinstance(rooms.get("rooms"), list):
-                    merged_brief["rooms_detected"] = rooms.get("rooms") or []
+                    merged_brief["rooms_detected"] = _normalize_rooms_detected_dims(rooms.get("rooms") or [])
             except Exception:
                 pass
+        merged_brief = _reconcile_selected_room(merged_brief)
 
         if floor_imgs and not _dims_ok(merged_brief):
             try:
@@ -599,6 +646,13 @@ def intake(req: IntakeRequest) -> IntakeResponse:
                 merged_brief = _merge_extracted_floorplan_dims(merged_brief, extracted)
             except Exception:
                 pass
+
+        if floor_imgs:
+            try:
+                north_raw = extract_plan_north_from_floorplan(cfg=cfg, floorplan_images=floor_imgs)
+                merged_brief = _merge_plan_north(merged_brief, north_raw)
+            except Exception:
+                logger.warning("extract_plan_north_from_floorplan failed", exc_info=True)
 
         merged_brief["floorplan_north_clockwise_deg"] = _north_deg_from_brief(merged_brief)
         rid_o, rnm_o = _room_target_for_openings(merged_brief)
@@ -618,32 +672,8 @@ def intake(req: IntakeRequest) -> IntakeResponse:
             except Exception:
                 logger.warning("extract_wall_openings_from_floorplan failed", exc_info=True)
 
-        result = generate_next_questions(
-            cfg=cfg,
-            brief=merged_brief,
-            chat_history=[m.model_dump() for m in req.chat_history],
-            context_images=[img.model_dump() for img in req.context_images],
-            max_questions=req.max_questions,
-        )
-        updated = dict(result.get("updated_brief") or merged_brief)
-        if _dims_ok(merged_brief) and not _dims_ok(updated):
-            updated["room_length_m"] = merged_brief.get("room_length_m")
-            updated["room_width_m"] = merged_brief.get("room_width_m")
-            if merged_brief.get("ceiling_height_m") is not None:
-                updated["ceiling_height_m"] = merged_brief.get("ceiling_height_m")
-
-        prev_walls = merged_brief.get("wall_assignments") or {}
-        new_walls = updated.get("wall_assignments") or {}
-        merged_walls = {
-            "north": list(new_walls.get("north") or prev_walls.get("north") or []),
-            "south": list(new_walls.get("south") or prev_walls.get("south") or []),
-            "east": list(new_walls.get("east") or prev_walls.get("east") or []),
-            "west": list(new_walls.get("west") or prev_walls.get("west") or []),
-        }
-        updated["wall_assignments"] = merged_walls
-
-        updated["wall_openings"] = _normalize_wall_openings(merged_brief.get("wall_openings"))
-        updated["floorplan_north_clockwise_deg"] = float(merged_brief.get("floorplan_north_clockwise_deg") or 0.0) % 360.0
+        updated = dict(merged_brief)
+        updated = _reconcile_selected_room(updated)
 
         if not _dims_ok(updated):
             extracted = _extract_dims_from_chat([m.model_dump() for m in req.chat_history])
@@ -651,107 +681,9 @@ def intake(req: IntakeRequest) -> IntakeResponse:
                 updated["room_length_m"] = extracted["room_length_m"]
                 updated["room_width_m"] = extracted["room_width_m"]
 
-        if not (updated.get("budget_band") and str(updated.get("budget_band")).strip()):
-            for msg in reversed(req.chat_history):
-                if msg.role != "user":
-                    continue
-                text = msg.content or ""
-                low = text.lower()
-                if any(kw in low for kw in ("lakh", "₹", "rs.", "rs ", "inr", "budget")):
-                    updated["budget_band"] = text.strip()[:120]
-                    break
-
-        STYLE_HINTS = (
-            "modern minimal",
-            "modern",
-            "minimal",
-            "minimalist",
-            "japandi",
-            "scandinavian",
-            "industrial",
-            "indian contemporary",
-            "contemporary",
-            "traditional",
-            "boho",
-            "rustic",
-            "art deco",
-            "mid-century",
-        )
-        if not (updated.get("style_direction") and str(updated.get("style_direction")).strip()):
-            for msg in reversed(req.chat_history):
-                if msg.role != "user":
-                    continue
-                low = (msg.content or "").lower()
-                for hint in STYLE_HINTS:
-                    if hint in low:
-                        updated["style_direction"] = hint
-                        break
-                if updated.get("style_direction"):
-                    break
-
-        existing_notes = str(updated.get("notes") or "")
-        if "wardrobe style:" not in existing_notes.lower():
-            wardrobe_style: str | None = None
-            for msg in reversed(req.chat_history):
-                if msg.role != "user":
-                    continue
-                low = (msg.content or "").lower()
-                if "wardrobe" in low:
-                    for hint in STYLE_HINTS:
-                        if hint in low:
-                            wardrobe_style = hint
-                            break
-                if not wardrobe_style:
-                    for hint in STYLE_HINTS:
-                        if hint in low:
-                            wardrobe_style = hint
-                            break
-                if wardrobe_style:
-                    break
-            if wardrobe_style:
-                updated["notes"] = (existing_notes + ("\n" if existing_notes else "") + f"Wardrobe style: {wardrobe_style}.").strip()
-
-        mk = updated.get("mood_keywords")
-        has_mood = isinstance(mk, list) and len([k for k in mk if isinstance(k, str) and k.strip()]) > 0
-        if not has_mood:
-            MOOD_HINTS = (
-                "cozy",
-                "warm",
-                "calm",
-                "serene",
-                "elegant",
-                "vibrant",
-                "playful",
-                "bold",
-                "luxurious",
-                "airy",
-                "bright",
-                "moody",
-                "dramatic",
-                "fresh",
-                "minimal",
-                "rustic",
-                "natural",
-                "earthy",
-            )
-            collected: List[str] = []
-            for msg in reversed(req.chat_history):
-                if msg.role != "user":
-                    continue
-                low = (msg.content or "").lower()
-                if any(tag in low for tag in ("mood", "atmosphere", "feel", "vibe")) or len(collected) == 0:
-                    for hint in MOOD_HINTS:
-                        if hint in low and hint not in collected:
-                            collected.append(hint)
-                if collected:
-                    break
-            if collected:
-                updated["mood_keywords"] = collected
-
-        return _gate_intake_result(
+        return _finalize_intake_brief(
             updated,
-            list(result.get("questions") or []),
-            req.max_questions,
+            [m.model_dump() for m in req.chat_history],
             has_floorplan_image=bool(floor_imgs),
         )
     except HTTPException:
@@ -807,7 +739,8 @@ def designs(req: DesignsRequest) -> DesignsResponse:
                 + ("south-west corner looking toward the north-east" if has_opposing else "diagonally opposite corner")
                 + " so that the listed walls (especially any opposing N+S or E+W pair) are BOTH visible in the same frame. "
                 "Do NOT shoot straight-on at one wall; the rendered image must show the wall placements above. "
-                "Repeat the wall placement verbatim in the image_prompt and acknowledge it in the rationale."
+                "In every image_prompt, map each compass wall to a frame position (NORTH=back, EAST=right, WEST=left, SOUTH=near for SW-corner shots) "
+                "and state which wall each hero item and door/window is on. Repeat the wall placement verbatim and acknowledge it in the rationale."
             )
         if openings_text:
             logger.info("Wall openings from plan:\n%s", openings_text)
@@ -822,9 +755,16 @@ def designs(req: DesignsRequest) -> DesignsResponse:
             extra_msgs.append(
                 "PLACEMENT VERIFICATION (user must be able to check N/S/E/W in your output):\n"
                 + placement_map
-                + "\n\nIn every image_prompt: include a small compass-rose graphic in a corner (no N/S/E/W letters on the image). "
-                "Name each major item with its compass wall in the prompt text (e.g. 'queen bed centred on NORTH wall'). "
+                + "\n\nIn every image_prompt: describe wall directions in words only (e.g. queen bed on NORTH wall). "
+                "Never request a compass rose, logo, watermark, or text overlay in the rendered photograph. "
                 "In every rationale: start with 'Layout:' then add 'Compass placement:' repeating the map above item-by-item."
+            )
+        layout_block = build_mandatory_layout_block(merged_brief)
+        if layout_block:
+            extra_msgs.append(
+                "LOCKED LAYOUT FOR image_prompt (copy this block verbatim at the START of every image_prompt, "
+                "then add style/material details after it):\n"
+                + layout_block
             )
         if extra_msgs:
             chat_for_designs = chat_for_designs + [{"role": "user", "content": "\n\n".join(extra_msgs)}]
@@ -959,14 +899,28 @@ def designs(req: DesignsRequest) -> DesignsResponse:
                         )
 
             prompt = str(d.get("image_prompt") or "")
+            prompt = enforce_wall_placement_in_prompt(prompt, merged_brief)
             prompt = enhance_image_prompt_for_compass(prompt, merged_brief)
+            # Trim style fluff if the combined prompt is huge — keep the locked layout block intact.
+            if len(prompt) > 5500 and "MANDATORY FLOOR PLAN LAYOUT" in prompt:
+                head, _, tail = prompt.partition(
+                    "\n\nSTYLE AND FINISHES (vary materials/colors only — never change wall positions or openings):\n"
+                )
+                if tail:
+                    prompt = head + "\n\nSTYLE AND FINISHES:\n" + tail[:2200]
             rationale = str(d.get("rationale") or "")
             if placement_map and placement_map not in rationale:
                 rationale = (rationale.rstrip() + "\n\n" + placement_map).strip()
 
             image_b64: str | None = None
             if prompt:
-                imgs = generate_images(cfg=cfg, prompt=prompt, n=1)
+                fp_for_img = [img.model_dump() for img in req.floorplan_images]
+                imgs = generate_images(
+                    cfg=cfg,
+                    prompt=prompt,
+                    n=1,
+                    floorplan_images=fp_for_img if fp_for_img else None,
+                )
                 if imgs:
                     image_b64 = base64.b64encode(imgs[0]).decode("utf-8")
 

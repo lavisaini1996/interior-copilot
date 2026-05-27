@@ -98,10 +98,22 @@ const ITEM_WALL_SPACE_M: Record<string, number> = {
   chair: 0.75,
 };
 
-const DEFAULT_NS_WALL_M = 3.6;
-const DEFAULT_EW_WALL_M = 4.2;
+const DEFAULT_NS_WALL_M = 3.4;
+const DEFAULT_EW_WALL_M = 3.8;
 const ITEM_CLEARANCE_M = 0.25;
 const MIN_USABLE_AFTER_OPENINGS_M = 0.9;
+const MIN_WALL_M = 2.4;
+const MAX_WALL_M = 14.0;
+const FT_TO_M = 0.3048;
+
+const ESSENTIAL_ITEMS_BY_ROOM: Record<string, Set<string>> = {
+  bedroom: new Set(["bed"]),
+  living: new Set(["sofa", "sectional"]),
+  kitchen: new Set(["base_cabinets", "sink"]),
+  dining: new Set(["dining_table"]),
+  bathroom: new Set(["wc", "wall_wc", "vanity"]),
+  study: new Set(["desk", "study"]),
+};
 
 function num(v: unknown): number | null {
   if (v == null) return null;
@@ -109,16 +121,84 @@ function num(v: unknown): number | null {
   return Number.isFinite(x) && x > 0 ? x : null;
 }
 
-function wallLengthM(brief: Record<string, unknown>, wallId: WallId): number {
-  const ln = num(brief.room_length_m);
-  const wd = num(brief.room_width_m);
-  if (wallId === "north" || wallId === "south") {
-    return wd ?? DEFAULT_NS_WALL_M;
+export function normalizeDimsToMetres(
+  lengthM: number | null,
+  widthM: number | null,
+): { lengthM: number | null; widthM: number | null } {
+  if (lengthM == null || widthM == null) return { lengthM, widthM };
+  const mx = Math.max(lengthM, widthM);
+  const mn = Math.min(lengthM, widthM);
+  const area = lengthM * widthM;
+  if (mx <= 6.5) return { lengthM, widthM };
+  if (mx >= 8 && mx <= 30 && mn >= 5 && mn <= 22 && area >= 70 && area <= 650) {
+    return {
+      lengthM: Math.round(lengthM * FT_TO_M * 1000) / 1000,
+      widthM: Math.round(widthM * FT_TO_M * 1000) / 1000,
+    };
   }
-  return ln ?? DEFAULT_EW_WALL_M;
+  return { lengthM, widthM };
 }
 
-function openingUsageM(openings: string[]): { useM: number; blocksAll: boolean } {
+function roomKindFromBrief(brief: Record<string, unknown>): string {
+  const label = String(brief.selected_room_name ?? brief.space_type ?? "").toLowerCase();
+  if (label.includes("bed")) return "bedroom";
+  if (label.includes("kitchen")) return "kitchen";
+  if (label.includes("living") || label.includes("lounge")) return "living";
+  if (label.includes("dining")) return "dining";
+  if (label.includes("bath") || label.includes("toilet") || label.includes("wc")) return "bathroom";
+  if (label.includes("study") || label.includes("office")) return "study";
+  return "bedroom";
+}
+
+function isEssentialItem(brief: Record<string, unknown>, itemId: string): boolean {
+  const kind = roomKindFromBrief(brief);
+  return ESSENTIAL_ITEMS_BY_ROOM[kind]?.has(itemId) ?? false;
+}
+
+/** Room dimensions from brief or the selected entry in rooms_detected. */
+export function resolveRoomDims(brief: Record<string, unknown>): { lengthM: number | null; widthM: number | null } {
+  let lengthM = num(brief.room_length_m);
+  let widthM = num(brief.room_width_m);
+
+  const rid = String(brief.selected_room_id ?? "").trim();
+  const rooms = brief.rooms_detected;
+  if (rid && Array.isArray(rooms)) {
+    for (const r of rooms) {
+      if (!r || typeof r !== "object") continue;
+      if (String((r as { id?: string }).id ?? "") !== rid) continue;
+      const row = r as { length_m?: unknown; width_m?: unknown };
+      lengthM = num(row.length_m) ?? lengthM;
+      widthM = num(row.width_m) ?? widthM;
+      break;
+    }
+  }
+  return normalizeDimsToMetres(lengthM, widthM);
+}
+
+function wallLengthM(brief: Record<string, unknown>, wallId: WallId): number {
+  const { lengthM, widthM } = resolveRoomDims(brief);
+  const openings = (brief.wall_openings as WallAssignments) || {
+    north: [],
+    south: [],
+    east: [],
+    west: [],
+  };
+  const ops = openings[wallId] ?? [];
+  const hasOps = Array.isArray(ops) && ops.length > 0;
+
+  let run: number;
+  if (wallId === "north" || wallId === "south") {
+    run = widthM ?? (hasOps ? DEFAULT_NS_WALL_M - 0.4 : DEFAULT_NS_WALL_M);
+  } else {
+    run = lengthM ?? (hasOps ? DEFAULT_EW_WALL_M - 0.4 : DEFAULT_EW_WALL_M);
+  }
+  return Math.min(MAX_WALL_M, Math.max(MIN_WALL_M, run));
+}
+
+function openingUsageM(
+  openings: string[],
+  wallLen?: number,
+): { useM: number; blocksAll: boolean } {
   let total = 0;
   for (const raw of openings) {
     const op = raw.trim().toLowerCase();
@@ -126,18 +206,24 @@ function openingUsageM(openings: string[]): { useM: number; blocksAll: boolean }
     if (
       op.includes("full-height") ||
       op.includes("full height") ||
-      op.includes("glazing wall") ||
       op.includes("curtain wall") ||
       op.includes("entire wall")
     ) {
       return { useM: 999, blocksAll: true };
     }
-    if (op.includes("double door")) total += 1.6;
-    else if (op.includes("door")) total += 0.95;
-    else if (op.includes("slider") || op.includes("sliding") || op.includes("folding")) total += 1.55;
-    else if (op.includes("window") || op.includes("glazing")) total += 1.2;
-    else if (op.includes("opening") || op.includes("arch")) total += 0.85;
-    else total += 0.75;
+    if (op.includes("glazing wall") && !op.includes("window")) {
+      return { useM: 999, blocksAll: true };
+    }
+    if (op.includes("double door")) total += 1.45;
+    else if (op.includes("door")) total += 0.85;
+    else if (op.includes("slider") || op.includes("sliding") || op.includes("folding")) total += 1.35;
+    else if (op.includes("window")) total += 0.5;
+    else if (op.includes("glazing")) total += 0.55;
+    else if (op.includes("opening") || op.includes("arch")) total += 0.75;
+    else total += 0.65;
+  }
+  if (wallLen != null && wallLen > 0 && total > wallLen * 0.55) {
+    total = wallLen * 0.55;
   }
   return { useM: total, blocksAll: false };
 }
@@ -164,10 +250,11 @@ export function canPlaceOnWall(params: {
   if (itemSpace <= 0) return { ok: true, message: "" };
 
   const wallLen = wallLengthM(brief, wallId);
-  const wallOps = openings[wallId] ?? [];
-  const { useM: opUse, blocksAll } = openingUsageM(wallOps);
+  const wallOps = (openings[wallId] ?? []).map((x) => String(x)).filter((x) => x.trim());
+  const essential = isEssentialItem(brief, itemId);
+  const { useM: opUse, blocksAll } = openingUsageM(wallOps, wallLen);
 
-  if (blocksAll) {
+  if (blocksAll && !essential) {
     return {
       ok: false,
       message: `Cannot place on the ${wallName} wall: openings (e.g. full-height glazing) use the full wall. Try another wall.`,
@@ -178,15 +265,20 @@ export function canPlaceOnWall(params: {
   if (current.includes(itemId)) return { ok: true, message: "" };
 
   const usedItems = itemsUsageM(current);
-  const needed = itemSpace + ITEM_CLEARANCE_M;
+  const clearance = essential ? 0.15 : ITEM_CLEARANCE_M;
+  const needed = itemSpace + clearance;
   const available = wallLen - opUse - usedItems;
+
+  if (essential && !blocksAll) {
+    const minRun = Math.min(itemSpace + 0.1, 1.35);
+    if (available >= minRun) return { ok: true, message: "" };
+  }
 
   if (available < needed) {
     const opNote = wallOps.length ? ` Doors/windows need ~${opUse.toFixed(1)} m.` : "";
-    const ln = num(brief.room_length_m);
-    const wd = num(brief.room_width_m);
+    const { lengthM, widthM } = resolveRoomDims(brief);
     const dimNote =
-      ln && wd
+      lengthM && widthM
         ? ` Wall ~${wallLen.toFixed(1)} m (${wallId === "north" || wallId === "south" ? "room width" : "room length"}).`
         : ` Estimated wall ~${wallLen.toFixed(1)} m — add room dimensions from the plan for accuracy.`;
     return {
@@ -195,7 +287,7 @@ export function canPlaceOnWall(params: {
     };
   }
 
-  if (opUse > 0 && available < needed + MIN_USABLE_AFTER_OPENINGS_M) {
+  if (!essential && opUse > 0 && available < needed + MIN_USABLE_AFTER_OPENINGS_M) {
     return {
       ok: false,
       message: `The ${wallName} wall is too tight next to doors/windows. Pick a wall with more clear space.`,
@@ -218,7 +310,7 @@ export function formatPlacementVerification(brief: Record<string, unknown>): str
     east: [],
     west: [],
   };
-  const lines: string[] = ["Compass placement (verify in image — N/S/E/W):"];
+  const lines: string[] = ["Compass placement (N/S/E/W):"];
   const deg = brief.floorplan_north_clockwise_deg;
   if (deg != null && !Number.isNaN(Number(deg))) {
     lines.push(`  Plan north: ${Number(deg) % 360}° clockwise from top of floor-plan image.`);
@@ -230,8 +322,7 @@ export function formatPlacementVerification(brief: Record<string, unknown>): str
     const opTxt = ops.join("; ") || "none";
     lines.push(`  ${WALL_LABELS[wid]} wall — Furniture: ${itemTxt} | Openings: ${opTxt}`);
   }
-  const ln = num(brief.room_length_m);
-  const wd = num(brief.room_width_m);
-  if (ln && wd) lines.push(`  Room size: ${ln.toFixed(2)} m (N↔S) × ${wd.toFixed(2)} m (E↔W).`);
+  const { lengthM, widthM } = resolveRoomDims(brief);
+  if (lengthM && widthM) lines.push(`  Room size: ${lengthM.toFixed(2)} m (N↔S) × ${widthM.toFixed(2)} m (E↔W).`);
   return lines.join("\n");
 }
