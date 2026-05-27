@@ -434,6 +434,14 @@ function WallLayout(props: {
         <div className="muted">
           Click a wall to place items. Room: <strong>{roomLabel}</strong>. Generated images will lock furniture and
           doors/windows to these N/S/E/W walls.
+          {typeof brief.floorplan_north_clockwise_deg === "number" &&
+          !Number.isNaN(Number(brief.floorplan_north_clockwise_deg)) ? (
+            <>
+              {" "}
+              Plan north is <strong>{Number(brief.floorplan_north_clockwise_deg) % 360}°</strong> clockwise from the top
+              of your uploaded plan — align ↑ N on this diagram with north on the sheet.
+            </>
+          ) : null}
         </div>
         <button className="btn secondary" onClick={clearAll} disabled={disabled}>
           Reset all walls
@@ -605,6 +613,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [styleRefs, setStyleRefs] = useState<UploadedRef[]>([]);
   const [floorplanRefs, setFloorplanRefs] = useState<UploadedRef[]>([]);
+  const [floorplanPreview, setFloorplanPreview] = useState<UploadedRef | null>(null);
   const [floorplanText, setFloorplanText] = useState("");
   const [skipWallLayout, setSkipWallLayout] = useState(false);
   const [skipDesignMaterials, setSkipDesignMaterials] = useState(false);
@@ -657,6 +666,15 @@ export function App() {
 
   const hasFloorPlan = floorplanRefs.length > 0 || floorplanText.trim().length >= 12;
 
+  useEffect(() => {
+    if (!floorplanPreview) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFloorplanPreview(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [floorplanPreview]);
+
 
   useEffect(() => {
     let cancelled = false;
@@ -682,6 +700,10 @@ export function App() {
     const m = brief.material_preferences;
     return Array.isArray(m) ? m.map((x) => String(x)) : [];
   }, [brief.material_preferences]);
+
+  const hasDesignNotes = useMemo(() => {
+    return String(brief.notes ?? "").trim().length > 0;
+  }, [brief.notes]);
 
   const onCatalogMaterialsChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const selected = Array.from(e.target.selectedOptions, (opt) => opt.value);
@@ -924,7 +946,7 @@ export function App() {
         floorplan_text: floorplanText.trim() || undefined,
         floorplan_images: floorplanImages,
         style_reference_images: styleImages,
-        num_designs: 5,
+        num_designs: 3,
       });
       setDesignCurrency(resp.currency ?? "INR");
       setDesigns(resp.designs);
@@ -983,7 +1005,11 @@ export function App() {
           <div className="fullscreenLoaderCard">
             <div className="spinner" aria-hidden="true" />
             <div className="fullscreenLoaderTitle">{genOverlayTitle}</div>
-            <div className="fullscreenLoaderSub">Please wait — this can take a minute.</div>
+            <div className="fullscreenLoaderSub">
+              {hasFloorPlan && !skipWallLayout
+                ? "Generating 1 room render + 3 catalog options (~1–2 min, economy mode). Options 2–3 show BOM only."
+                : "Please wait — this can take a minute."}
+            </div>
             <div className="stepper" style={{ marginTop: 14 }}>
               {genSteps.map((s, i) => {
                 const cur = stepIndex(genStep);
@@ -1044,14 +1070,16 @@ export function App() {
           steps={workflow.steps}
           title="Material preference (optional)"
           footer={
-            <button
-              type="button"
-              className="btn secondary"
-              onClick={() => setSkipDesignMaterials(true)}
-              disabled={isBusy || skipDesignMaterials}
-            >
-              Continue without materials
-            </button>
+            !hasDesignNotes && selectedMaterialNames.length === 0 ? (
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() => setSkipDesignMaterials(true)}
+                disabled={isBusy || skipDesignMaterials}
+              >
+                Continue without materials
+              </button>
+            ) : null
           }
         >
           <p className="muted" style={{ marginBottom: 12 }}>
@@ -1124,10 +1152,18 @@ export function App() {
             ) : null}
           </div>
           {floorplanRefs.length ? (
-            <div className="thumbs">
+            <div className="thumbs fpThumbs">
               {floorplanRefs.map((r) => (
-                <div className="thumb" key={r.id} title={r.name}>
-                  <img className="thumbImg" src={r.preview_data_url} alt={r.name} />
+                <div className="thumb" key={r.id} title="Click to preview">
+                  <button
+                    type="button"
+                    className="thumbBtn"
+                    onClick={() => setFloorplanPreview(r)}
+                    disabled={isBusy || processingFloorplan}
+                    aria-label={`Preview ${r.name}`}
+                  >
+                    <img className="thumbImg" src={r.preview_data_url} alt={r.name} />
+                  </button>
                   <button
                     className="thumbX"
                     onClick={() => setFloorplanRefs((prev) => prev.filter((x) => x.id !== r.id))}
@@ -1420,10 +1456,22 @@ export function App() {
                   {d.image_base64_png ? (
                     <img className="img" src={b64ToDataUrlPng(d.image_base64_png)} alt={`Design option ${i + 1}`} />
                   ) : (
-                    <div className="empty">No image returned for this option.</div>
+                    <div className="empty">
+                      No verified image for this option — wall layout could not be matched. Try Generate again or
+                      check options marked Layout verified first.
+                    </div>
                   )}
                   <div className="smallTitle">
                     Option {i + 1}: {d.title}
+                    {d.layout_verified ? (
+                      <span className="pill ok" style={{ marginLeft: 8 }}>
+                        Layout verified
+                      </span>
+                    ) : d.image_base64_png ? (
+                      <span className="pill warn" style={{ marginLeft: 8 }}>
+                        Layout not verified
+                      </span>
+                    ) : null}
                   </div>
                   {d.placement_summary ? (
                     <pre className="content placementMap">{d.placement_summary}</pre>
@@ -1468,6 +1516,29 @@ export function App() {
         </WorkflowSection>
 
       </div>
+
+      {floorplanPreview ? (
+        <div
+          className="imgModalOverlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Floor plan preview"
+          onClick={() => setFloorplanPreview(null)}
+        >
+          <div className="imgModal" onClick={(e) => e.stopPropagation()}>
+            <div className="imgModalTop">
+              <div className="imgModalTitle">{floorplanPreview.name}</div>
+              <button className="btn secondary" onClick={() => setFloorplanPreview(null)}>
+                Close
+              </button>
+            </div>
+            <img className="imgModalImg" src={floorplanPreview.preview_data_url} alt={floorplanPreview.name} />
+            <div className="muted" style={{ marginTop: 8 }}>
+              Tip: press <strong>Esc</strong> to close.
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

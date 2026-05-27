@@ -27,6 +27,7 @@ export type DesignVariant = {
   title: string;
   rationale: string;
   placement_summary?: string;
+  layout_verified?: boolean;
   catalog_items: DesignItem[];
   materials: DesignMaterialLine[];
   estimated_total: number;

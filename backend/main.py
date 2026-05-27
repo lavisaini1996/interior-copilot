@@ -27,12 +27,17 @@ from backend.llm import (
     generate_images,
     generate_moodboard_prompts,
 )
+from backend.gemini_client import score_render_wall_layout
 from backend.catalog import load_catalog
 from backend.http_errors import http_exception_from_llm_error
 from backend.wall_placement import (
+    WALL_IDS,
+    build_design_style_suffix,
+    build_layout_base_render_prompt,
+    build_layout_correction_block,
     build_mandatory_layout_block,
-    enhance_image_prompt_for_compass,
-    enforce_wall_placement_in_prompt,
+    build_render_image_prompt,
+    economy_mode,
     format_placement_verification,
     normalize_dims_to_metres,
     WALL_ITEM_LABELS,
@@ -42,6 +47,205 @@ from backend.wall_placement import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("interior_copilot")
 logger.info("Starting Interior Copilot API with LLM provider: %s", active_provider())
+
+
+def _env_int(name: str, default: int, *, lo: int = 1, hi: int = 8) -> int:
+    try:
+        v = int(os.environ.get(name, str(default)))
+    except ValueError:
+        v = default
+    return max(lo, min(v, hi))
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
+
+
+def _openings_populated(brief: Dict[str, Any]) -> bool:
+    openings = brief.get("wall_openings") or {}
+    if not isinstance(openings, dict):
+        return False
+    return any(isinstance(openings.get(w), list) and openings.get(w) for w in WALL_IDS)
+
+
+def _layout_render_config() -> Dict[str, Any]:
+    """Economy defaults minimize image + vision QA calls."""
+    if economy_mode():
+        return {
+            "n_imgs": _env_int("LAYOUT_IMAGE_CANDIDATES", 1),
+            "max_rounds": _env_int("LAYOUT_RENDER_MAX_ROUNDS", 1),
+            "want_verify": _env_flag("LAYOUT_QA_SKIP") is False and _env_flag("LAYOUT_QA_LITE"),
+            "max_images": _env_int("DESIGN_IMAGES_MAX", 1),
+            "require_pass": False,
+        }
+    return {
+        "n_imgs": _env_int("LAYOUT_IMAGE_CANDIDATES", 2),
+        "max_rounds": _env_int("LAYOUT_RENDER_MAX_ROUNDS", 2),
+        "want_verify": not _env_flag("LAYOUT_QA_SKIP"),
+        "max_images": _env_int("DESIGN_IMAGES_MAX", 2),
+        "require_pass": _env_flag("LAYOUT_REQUIRE_QA_PASS"),
+    }
+
+
+def _pick_best_layout_candidate(
+    *,
+    cfg: Any,
+    candidates: List[bytes],
+    layout_block: str,
+    merged_brief: Dict[str, Any],
+) -> tuple[bytes | None, bool, int]:
+    """Return best candidate bytes, whether it passed strict QA, and layout score."""
+    min_score = _env_int("LAYOUT_MIN_SCORE", 8, lo=5, hi=10)
+    best: bytes | None = None
+    best_score = -1
+    for cand in candidates:
+        ok, score, reasons = score_render_wall_layout(
+            cfg=cfg,
+            rendered_png_bytes=cand,
+            locked_layout_text=layout_block,
+            brief=merged_brief,
+        )
+        if score > best_score:
+            best_score = score
+            best = cand
+        if ok:
+            return cand, True, score
+        if reasons:
+            logger.info("Layout QA score=%d: %s", score, "; ".join(reasons[:2]))
+    if best is not None and best_score >= min_score:
+        return best, False, best_score
+    return best, False, best_score
+
+
+def _render_design_image_b64(
+    *,
+    cfg: Any,
+    prompt: str,
+    merged_brief: Dict[str, Any],
+    layout_block: str,
+    floorplan_images: List[Dict[str, str]],
+    design_index: int,
+    design_total: int,
+) -> tuple[str | None, bool]:
+    """Generate one room render; retries until layout QA passes or rounds exhausted."""
+    cfg_render = _layout_render_config()
+    want_verify = (
+        bool(layout_block.strip())
+        and active_provider() == "gemini"
+        and bool(cfg_render["want_verify"])
+    )
+    n_imgs = int(cfg_render["n_imgs"]) if want_verify else 1
+    max_rounds = int(cfg_render["max_rounds"]) if want_verify else 1
+    require_pass = bool(cfg_render["require_pass"])
+
+    # Cost-saver economy mode previously allowed showing images even when QA failed.
+    # For the "bed on the window wall" scenario, correctness matters more than cost.
+    critical_bed_on_north_window = False
+    try:
+        assignments = merged_brief.get("wall_assignments") or {}
+        openings = merged_brief.get("wall_openings") or {}
+        if isinstance(assignments, dict) and isinstance(openings, dict):
+            north_items = assignments.get("north") or []
+            north_ops = openings.get("north") or []
+            critical_bed_on_north_window = (
+                isinstance(north_items, list)
+                and "bed" in north_items
+                and isinstance(north_ops, list)
+                and any(isinstance(x, str) and "window" in x.lower() for x in north_ops)
+            )
+    except Exception:
+        critical_bed_on_north_window = False
+
+    if want_verify and critical_bed_on_north_window:
+        require_pass = True
+        max_rounds = max(max_rounds, 2)
+
+    logger.info(
+        "Rendering image for design %d/%d (%d candidates × %d rounds, layout_qa=%s)",
+        design_index + 1,
+        design_total,
+        n_imgs,
+        max_rounds,
+        want_verify,
+    )
+
+    correction = ""
+    all_candidates: List[bytes] = []
+    for round_i in range(max_rounds):
+        prompt_use = (correction + "\n\n" + prompt).strip() if correction else prompt
+        imgs = generate_images(
+            cfg=cfg,
+            prompt=prompt_use,
+            n=n_imgs,
+            floorplan_images=floorplan_images or None,
+        )
+        if not imgs:
+            continue
+        all_candidates.extend(imgs)
+        if want_verify:
+            picked, passed, score = _pick_best_layout_candidate(
+                cfg=cfg,
+                candidates=imgs,
+                layout_block=layout_block,
+                merged_brief=merged_brief,
+            )
+            if picked and passed:
+                logger.info(
+                    "Design %d/%d layout QA passed (score=%d, round=%d)",
+                    design_index + 1,
+                    design_total,
+                    score,
+                    round_i + 1,
+                )
+                return base64.b64encode(picked).decode("utf-8"), True
+            if picked and not require_pass and round_i == max_rounds - 1:
+                logger.warning(
+                    "Design %d/%d: best layout score=%d (below strict pass); using best effort",
+                    design_index + 1,
+                    design_total,
+                    score,
+                )
+                return base64.b64encode(picked).decode("utf-8"), False
+        else:
+            return base64.b64encode(imgs[0]).decode("utf-8"), True
+        if (not economy_mode()) or critical_bed_on_north_window:
+            correction = build_layout_correction_block(merged_brief)
+
+    if want_verify and all_candidates:
+        picked, passed, score = _pick_best_layout_candidate(
+            cfg=cfg,
+            candidates=all_candidates,
+            layout_block=layout_block,
+            merged_brief=merged_brief,
+        )
+        if picked and passed:
+            return base64.b64encode(picked).decode("utf-8"), True
+        if picked and not require_pass:
+            logger.warning(
+                "Design %d/%d: no strict QA pass; using highest-scored candidate (score=%d)",
+                design_index + 1,
+                design_total,
+                score,
+            )
+            return base64.b64encode(picked).decode("utf-8"), False
+        if picked:
+            logger.warning(
+                "Design %d/%d: layout QA did not meet strict requirements (score=%d) — returning best effort image anyway",
+                design_index + 1,
+                design_total,
+                score,
+            )
+            return base64.b64encode(picked).decode("utf-8"), False
+        logger.warning(
+            "Design %d/%d: layout QA failed after %d rounds and no candidates were available — omitting image",
+            design_index + 1,
+            design_total,
+            max_rounds,
+        )
+        return None, False
+
+    return None, False
+
 
 app = FastAPI(title="Interior Copilot API", version="0.1.0")
 
@@ -582,6 +786,7 @@ class DesignVariant(BaseModel):
     title: str
     rationale: str
     placement_summary: str = ""
+    layout_verified: bool = False
     catalog_items: List[DesignItem]
     materials: List[DesignMaterialLine]
     estimated_total: float
@@ -647,7 +852,8 @@ def intake(req: IntakeRequest) -> IntakeResponse:
             except Exception:
                 pass
 
-        if floor_imgs:
+        skip_north = economy_mode() and merged_brief.get("floorplan_north_has_indicator")
+        if floor_imgs and not skip_north:
             try:
                 north_raw = extract_plan_north_from_floorplan(cfg=cfg, floorplan_images=floor_imgs)
                 merged_brief = _merge_plan_north(merged_brief, north_raw)
@@ -656,8 +862,10 @@ def intake(req: IntakeRequest) -> IntakeResponse:
 
         merged_brief["floorplan_north_clockwise_deg"] = _north_deg_from_brief(merged_brief)
         rid_o, rnm_o = _room_target_for_openings(merged_brief)
-        merged_brief["wall_openings"] = dict(_EMPTY_WALL_OPENINGS)
-        if floor_imgs and (rnm_o or rid_o):
+        refresh_openings = not economy_mode() or not _openings_populated(merged_brief)
+        if refresh_openings:
+            merged_brief["wall_openings"] = dict(_EMPTY_WALL_OPENINGS)
+        if floor_imgs and (rnm_o or rid_o) and refresh_openings:
             try:
                 raw_o = extract_wall_openings_from_floorplan(
                     cfg=cfg,
@@ -732,40 +940,41 @@ def designs(req: DesignsRequest) -> DesignsResponse:
         extra_msgs: List[str] = []
         if wall_layout_text:
             logger.info("Wall assignments received:\n%s", wall_layout_text)
-            extra_msgs.append(
-                "WALL LAYOUT (mandatory placement — items must visibly sit on the named walls):\n"
-                + wall_layout_text
-                + "\n\nCAMERA RULE: use a two-point/corner perspective from the "
-                + ("south-west corner looking toward the north-east" if has_opposing else "diagonally opposite corner")
-                + " so that the listed walls (especially any opposing N+S or E+W pair) are BOTH visible in the same frame. "
-                "Do NOT shoot straight-on at one wall; the rendered image must show the wall placements above. "
-                "In every image_prompt, map each compass wall to a frame position (NORTH=back, EAST=right, WEST=left, SOUTH=near for SW-corner shots) "
-                "and state which wall each hero item and door/window is on. Repeat the wall placement verbatim and acknowledge it in the rationale."
-            )
         if openings_text:
             logger.info("Wall openings from plan:\n%s", openings_text)
-            extra_msgs.append(
-                "DETECTED OPENINGS FROM FLOOR PLAN (doors / windows — keep in renders):\n"
-                + openings_text
-                + "\n\nPlace each listed opening on the correct compass wall; do not move doors or windows to a different wall. "
-                "Mention key openings in the image_prompt when they affect furniture placement."
-            )
         placement_map = format_placement_verification(merged_brief)
-        if placement_map.strip():
-            extra_msgs.append(
-                "PLACEMENT VERIFICATION (user must be able to check N/S/E/W in your output):\n"
-                + placement_map
-                + "\n\nIn every image_prompt: describe wall directions in words only (e.g. queen bed on NORTH wall). "
-                "Never request a compass rose, logo, watermark, or text overlay in the rendered photograph. "
-                "In every rationale: start with 'Layout:' then add 'Compass placement:' repeating the map above item-by-item."
-            )
         layout_block = build_mandatory_layout_block(merged_brief)
-        if layout_block:
-            extra_msgs.append(
-                "LOCKED LAYOUT FOR image_prompt (copy this block verbatim at the START of every image_prompt, "
-                "then add style/material details after it):\n"
-                + layout_block
-            )
+        if economy_mode():
+            if wall_layout_text or openings_text:
+                extra_msgs.append(
+                    "Respect brief.wall_assignments and brief.wall_openings in every rationale "
+                    "(compass N/S/E/W). Image rendering uses a separate locked layout — do not contradict walls."
+                )
+            if placement_map.strip():
+                extra_msgs.append(
+                    "In each rationale start with 'Layout:' then one line 'Compass placement:' summarizing wall picks."
+                )
+        else:
+            if wall_layout_text:
+                extra_msgs.append(
+                    "WALL LAYOUT (mandatory placement — items must visibly sit on the named walls):\n"
+                    + wall_layout_text
+                )
+            if openings_text:
+                extra_msgs.append(
+                    "DETECTED OPENINGS FROM FLOOR PLAN:\n" + openings_text
+                )
+            if placement_map.strip():
+                extra_msgs.append(
+                    "PLACEMENT VERIFICATION:\n"
+                    + placement_map
+                    + "\n\nIn every rationale: start with 'Layout:' then 'Compass placement:'."
+                )
+            if layout_block:
+                extra_msgs.append(
+                    "LOCKED LAYOUT FOR image_prompt (copy verbatim at start of every image_prompt):\n"
+                    + layout_block
+                )
         if extra_msgs:
             chat_for_designs = chat_for_designs + [{"role": "user", "content": "\n\n".join(extra_msgs)}]
 
@@ -780,8 +989,10 @@ def designs(req: DesignsRequest) -> DesignsResponse:
         )
 
         # If the planner returns near-identical options (common failure mode),
-        # re-run once with an explicit diversity constraint.
+        # re-run once with an explicit diversity constraint (skipped in economy mode).
         try:
+            if economy_mode():
+                raise RuntimeError("skip diversity retry in economy mode")
             ds = planned.get("designs") or []
             sets = []
             for d in ds:
@@ -815,6 +1026,8 @@ def designs(req: DesignsRequest) -> DesignsResponse:
         # If the user asked for a material (e.g. "stone") but the planned selections do not include it,
         # re-run once with an explicit constraint (only when catalog has such materials).
         try:
+            if economy_mode():
+                raise RuntimeError("skip material retry in economy mode")
             prefs = merged_brief.get("material_preferences") or []
             prefs_l = [str(x).strip().lower() for x in prefs if isinstance(x, str)]
             wants_stone = any("stone" in p for p in prefs_l)
@@ -860,8 +1073,22 @@ def designs(req: DesignsRequest) -> DesignsResponse:
         except Exception:
             pass
 
+        design_list = (planned.get("designs") or [])[: req.num_designs]
+        has_layout = bool(layout_block.strip())
+        render_cfg = _layout_render_config()
+        max_with_images = (
+            int(render_cfg["max_images"]) if has_layout else req.num_designs
+        )
+        if economy_mode() and has_layout:
+            logger.info(
+                "Economy mode: rendering %d room image(s), layout QA=%s",
+                max_with_images,
+                render_cfg["want_verify"],
+            )
+        layout_base_prompt = build_layout_base_render_prompt(merged_brief) if has_layout else ""
+
         out: List[DesignVariant] = []
-        for d in (planned.get("designs") or [])[: req.num_designs]:
+        for idx, d in enumerate(design_list):
             item_ids = [x for x in (d.get("catalog_item_ids") or []) if isinstance(x, str)]
             items: List[DesignItem] = []
             items_total = 0.0
@@ -898,37 +1125,52 @@ def designs(req: DesignsRequest) -> DesignsResponse:
                             )
                         )
 
-            prompt = str(d.get("image_prompt") or "")
-            prompt = enforce_wall_placement_in_prompt(prompt, merged_brief)
-            prompt = enhance_image_prompt_for_compass(prompt, merged_brief)
-            # Trim style fluff if the combined prompt is huge — keep the locked layout block intact.
-            if len(prompt) > 5500 and "MANDATORY FLOOR PLAN LAYOUT" in prompt:
+            if has_layout and layout_base_prompt:
+                variant_style = build_design_style_suffix(d if isinstance(d, dict) else {})
+                prompt = (
+                    layout_base_prompt
+                    + "\n\nVARIANT STYLE (palette/materials/fabrics only — identical wall layout for every option):\n"
+                    + variant_style
+                )
+            else:
+                prompt = build_render_image_prompt(str(d.get("image_prompt") or ""), merged_brief)
+            if len(prompt) > 6000 and "MANDATORY FLOOR PLAN LAYOUT" in prompt:
                 head, _, tail = prompt.partition(
-                    "\n\nSTYLE AND FINISHES (vary materials/colors only — never change wall positions or openings):\n"
+                    "\n\nSTYLE (materials, colors, lighting, textiles only"
                 )
                 if tail:
-                    prompt = head + "\n\nSTYLE AND FINISHES:\n" + tail[:2200]
+                    prompt = head + "\n\nSTYLE (materials/colors only):\n" + tail[:1800]
             rationale = str(d.get("rationale") or "")
             if placement_map and placement_map not in rationale:
                 rationale = (rationale.rstrip() + "\n\n" + placement_map).strip()
 
             image_b64: str | None = None
-            if prompt:
+            layout_verified = False
+            if prompt and (not has_layout or idx < max_with_images):
                 fp_for_img = [img.model_dump() for img in req.floorplan_images]
-                imgs = generate_images(
+                image_b64, layout_verified = _render_design_image_b64(
                     cfg=cfg,
                     prompt=prompt,
-                    n=1,
-                    floorplan_images=fp_for_img if fp_for_img else None,
+                    merged_brief=merged_brief,
+                    layout_block=layout_block,
+                    floorplan_images=fp_for_img,
+                    design_index=idx,
+                    design_total=len(design_list),
                 )
-                if imgs:
-                    image_b64 = base64.b64encode(imgs[0]).decode("utf-8")
+            elif has_layout and idx >= max_with_images:
+                logger.info(
+                    "Skipping image for design %d/%d (DESIGN_IMAGES_MAX=%d)",
+                    idx + 1,
+                    len(design_list),
+                    max_with_images,
+                )
 
             out.append(
                 DesignVariant(
                     title=str(d.get("title") or "Design option"),
                     rationale=rationale,
                     placement_summary=placement_map,
+                    layout_verified=layout_verified,
                     catalog_items=items,
                     materials=mats_out,
                     estimated_total=float(items_total + mats_total),
@@ -936,6 +1178,9 @@ def designs(req: DesignsRequest) -> DesignsResponse:
                     prompt=prompt,
                 )
             )
+
+        if has_layout:
+            out.sort(key=lambda v: (not v.layout_verified, v.title))
 
         return DesignsResponse(currency=catalog.currency, designs=out)
     except HTTPException:

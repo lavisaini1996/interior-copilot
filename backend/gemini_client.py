@@ -15,6 +15,7 @@ from google.genai import types
 
 from backend.catalog import Catalog, load_catalog
 from backend.http_errors import is_network_error
+from backend.wall_placement import build_layout_qa_checklist
 
 logger = logging.getLogger("interior_copilot.gemini")
 
@@ -595,15 +596,12 @@ def generate_images_with_floorplan(
 
     client = _client(cfg)
     intro = (
-        "You are rendering a photorealistic interior photograph that MUST follow the compass layout below.\n"
-        "The FIRST attached image is the architectural floor plan — authoritative for room shape, "
-        "which wall is NORTH/SOUTH/EAST/WEST, and where each door/window sits.\n"
-        "Steps: (1) Read plan north from the drawing. (2) Map each labeled wall in the text to the same "
-        "physical wall in the plan. (3) Place every item of furniture flush on its assigned wall — "
-        "back wall = NORTH, right = EAST, left = WEST, near camera = SOUTH when using a south-west corner shot. "
-        "(4) Show doors/windows on the same walls as the plan, facing the named destination (hallway, closet, etc.).\n"
-        "Do not rotate, mirror, or swap walls. Do not invent extra doors. "
-        "Output a clean photograph with NO logo, watermark, compass graphic, or text overlay.\n\n"
+        "Render one photorealistic interior photo. The FIRST attached image is the floor plan (authoritative).\n"
+        "Read the text starting with '=== DIRECTOR MANDATE ===' and match it exactly before applying style.\n"
+        "If the DIRECTOR says bed on the FAR/BACK (NORTH) wall: the bed headboard must be on the deepest wall "
+        "in frame (view from south doorway), NOT on the left or right side walls.\n"
+        "TV on WEST = left wall only. Doors/windows only on walls listed. No extra openings.\n"
+        "No logo, watermark, or compass overlay.\n\n"
     )
     parts: List[types.Part] = [types.Part.from_text(text=intro + prompt)]
     for img in floorplan_images[:1]:
@@ -618,7 +616,7 @@ def generate_images_with_floorplan(
 
     config = types.GenerateContentConfig(
         response_modalities=["IMAGE", "TEXT"],
-        temperature=0.28,
+        temperature=0.1,
     )
 
     def _call():
@@ -644,11 +642,19 @@ def generate_images(
     floorplan_images: List[Dict[str, str]] | None = None,
 ) -> List[bytes]:
     if floorplan_images:
-        imgs = generate_images_with_floorplan(
-            cfg=cfg, prompt=prompt, floorplan_images=floorplan_images, n=n
-        )
-        if imgs:
-            return imgs
+        target = max(1, n)
+        out: List[bytes] = []
+        max_tries = target + 2
+        tries = 0
+        while len(out) < target and tries < max_tries:
+            tries += 1
+            batch = generate_images_with_floorplan(
+                cfg=cfg, prompt=prompt, floorplan_images=floorplan_images, n=1
+            )
+            if batch:
+                out.extend(batch)
+        if out:
+            return out[:target]
 
     if not (cfg.image_model or "").strip():
         return []
@@ -677,6 +683,98 @@ def generate_images(
         if gi.image and gi.image.image_bytes:
             out.append(gi.image.image_bytes)
     return out
+
+
+def score_render_wall_layout(
+    *,
+    cfg: GeminiConfig,
+    rendered_png_bytes: bytes,
+    locked_layout_text: str,
+    brief: Dict[str, Any] | None = None,
+) -> tuple[bool, int, List[str]]:
+    """
+    Vision QA with 0–10 score. ok=true only when layout is clearly correct (score >= 8).
+    """
+    if not rendered_png_bytes or not locked_layout_text.strip():
+        return True, 10, []
+
+    system = (
+        "You are a strict QA checker for interior renders.\n"
+        "You will be given (A) a LOCKED LAYOUT spec that defines which furniture/openings must be on each compass wall "
+        "and how those compass walls map to physical walls in the photo frame (back/left/right/near), and (B) a single "
+        "rendered interior image.\n"
+        "Task: score how well the IMAGE matches the LOCKED LAYOUT (0=wrong layout, 10=perfect).\n"
+        "Fail (ok=false, score<=7) if any hero item is on the wrong wall or doors/windows are on the wrong wall.\n"
+        "CRITICAL: If the bed is assigned to the NORTH wall (far/deep wall when viewing from the south doorway), "
+        "fail when the bed headboard is on the left (west) or right (east) side wall instead of the far wall.\n"
+        "CRITICAL: If the TV is assigned to the WEST wall, fail when the TV is not on the left wall.\n"
+        "CRITICAL: If a window is labeled centered on the NORTH wall, fail when it is a narrow strip to the left/right "
+        "of the bed instead of centered on the far wall.\n"
+        "CRITICAL: Fail if extra windows appear on walls with no openings listed, or if opening horizontal position "
+        "(left/center/right) does not match the spec.\n"
+        "Set ok=true only when score is 8 or higher and you are confident.\n"
+        "Output ONLY valid JSON matching the schema."
+    )
+    schema: Dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "ok": {"type": "boolean"},
+            "score": {"type": "integer"},
+            "reasons": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["ok", "score", "reasons"],
+    }
+    checklist = build_layout_qa_checklist(brief or {})
+    if not checklist:
+        checklist = [
+            "Every item listed on a compass wall must be physically placed on that wall in the photo (per spatial map).",
+            "Every opening listed must be on that compass wall in the photo.",
+            "No rotation/mirroring: left/right walls must match the spatial map.",
+        ]
+    payload = {
+        "locked_layout": locked_layout_text,
+        "checklist": checklist,
+    }
+    img_payload = {
+        "mime_type": "image/png",
+        "data_base64": base64.b64encode(rendered_png_bytes).decode("utf-8"),
+    }
+    try:
+        obj = _generate_json(
+            cfg=cfg,
+            system_text=system,
+            user_json_payload=payload,
+            context_images=[img_payload],
+            schema=schema,
+            temperature=0.0,
+        )
+        reasons = [str(x) for x in (obj.get("reasons") or []) if isinstance(x, str)]
+        try:
+            score = int(obj.get("score"))
+        except (TypeError, ValueError):
+            score = 10 if obj.get("ok") else 0
+        score = max(0, min(10, score))
+        ok = bool(obj.get("ok")) and score >= 8
+        return ok, score, reasons
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Render layout verification failed (treating as not-ok): %s", e)
+        return False, 0, [str(e)]
+
+
+def verify_render_matches_wall_layout(
+    *,
+    cfg: GeminiConfig,
+    rendered_png_bytes: bytes,
+    locked_layout_text: str,
+    brief: Dict[str, Any] | None = None,
+) -> bool:
+    ok, _, _ = score_render_wall_layout(
+        cfg=cfg,
+        rendered_png_bytes=rendered_png_bytes,
+        locked_layout_text=locked_layout_text,
+        brief=brief,
+    )
+    return ok
 
 
 def _catalog_payload(catalog: Catalog) -> Dict[str, Any]:

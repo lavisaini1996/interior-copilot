@@ -106,6 +106,8 @@ export function computeWorkflow(input: {
 
   const mats = brief.material_preferences;
   const hasMaterialPref = Array.isArray(mats) && mats.some((m) => String(m).trim());
+  const notesVal = brief.notes;
+  const hasDesignNotes = typeof notesVal === "string" && notesVal.trim().length > 0;
 
   const hasFloorPlanImage = floorplanImageCount > 0;
   const hasFloorPlanText = floorplanText.trim().length >= 12;
@@ -131,7 +133,9 @@ export function computeWorkflow(input: {
   const resultsDone = generateDone;
 
   const doneMap: Record<WorkflowStepId, boolean> = {
-    designType: skipDesignMaterials || hasMaterialPref,
+    // Step 1 is considered "accepted" when the user either selects catalog materials
+    // or provides notes by typing/speaking.
+    designType: skipDesignMaterials || hasMaterialPref || hasDesignNotes,
     floorPlan: hasFloorPlan,
     planSetup: !planSetupApplies || planSetupDone,
     wallLayout: wallLayoutDone,
