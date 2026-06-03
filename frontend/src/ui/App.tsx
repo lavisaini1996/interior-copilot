@@ -6,7 +6,9 @@ import {
   ImagePayload,
   postDesigns,
   postIntake,
+  postMoodboardWalls,
   type CatalogMaterial,
+  type MoodboardWallPanel,
 } from "./api";
 import {
   canPlaceOnWall,
@@ -329,6 +331,8 @@ type UploadedRef = {
   preview_data_url: string;
 };
 
+type AppTab = "design" | "moodboard";
+
 function stripDataUrlPrefix(dataUrl: string) {
   const idx = dataUrl.indexOf("base64,");
   if (idx === -1) return dataUrl;
@@ -385,10 +389,14 @@ function WallLayout(props: {
   roomLabel: string;
   disabled?: boolean;
   onChange: (next: WallAssignments) => void;
+  onOpeningsChange?: (next: WallAssignments) => void;
 }) {
-  const { brief, assignments, openings, items, roomLabel, disabled, onChange } = props;
+  const { brief, assignments, openings, items, roomLabel, disabled, onChange, onOpeningsChange } = props;
   const [activeWall, setActiveWall] = React.useState<WallId | null>(null);
   const [placementWarning, setPlacementWarning] = React.useState<string | null>(null);
+  const [editOpenings, setEditOpenings] = React.useState(false);
+  const [newOpeningText, setNewOpeningText] = React.useState("");
+  const [newOpeningWall, setNewOpeningWall] = React.useState<WallId>("north");
 
   const emptyOpenings: WallAssignments = { north: [], south: [], east: [], west: [] };
   const wallOpenings = openings ?? emptyOpenings;
@@ -418,6 +426,46 @@ function WallLayout(props: {
   const clearWall = (wall: WallId) => onChange({ ...assignments, [wall]: [] });
   const clearAll = () => onChange({ ...EMPTY_WALL_ASSIGNMENTS });
 
+  const moveOpening = (op: string, fromWall: WallId, toWall: WallId) => {
+    if (!onOpeningsChange) return;
+    const next: WallAssignments = {
+      north: [...(wallOpenings.north ?? [])],
+      south: [...(wallOpenings.south ?? [])],
+      east: [...(wallOpenings.east ?? [])],
+      west: [...(wallOpenings.west ?? [])],
+    };
+    next[fromWall] = (next[fromWall] ?? []).filter((x) => x !== op);
+    if (!next[toWall].includes(op)) next[toWall] = [...(next[toWall] ?? []), op];
+    onOpeningsChange(next);
+  };
+
+  const removeOpening = (op: string, fromWall: WallId) => {
+    if (!onOpeningsChange) return;
+    const next: WallAssignments = {
+      north: [...(wallOpenings.north ?? [])],
+      south: [...(wallOpenings.south ?? [])],
+      east: [...(wallOpenings.east ?? [])],
+      west: [...(wallOpenings.west ?? [])],
+    };
+    next[fromWall] = (next[fromWall] ?? []).filter((x) => x !== op);
+    onOpeningsChange(next);
+  };
+
+  const addOpening = () => {
+    if (!onOpeningsChange) return;
+    const txt = String(newOpeningText || "").trim();
+    if (!txt) return;
+    const next: WallAssignments = {
+      north: [...(wallOpenings.north ?? [])],
+      south: [...(wallOpenings.south ?? [])],
+      east: [...(wallOpenings.east ?? [])],
+      west: [...(wallOpenings.west ?? [])],
+    };
+    if (!next[newOpeningWall].includes(txt)) next[newOpeningWall] = [...(next[newOpeningWall] ?? []), txt];
+    onOpeningsChange(next);
+    setNewOpeningText("");
+  };
+
   const walls: { id: WallId; label: string }[] = [
     { id: "north", label: "North" },
     { id: "east", label: "East" },
@@ -443,14 +491,62 @@ function WallLayout(props: {
             </>
           ) : null}
         </div>
-        <button className="btn secondary" onClick={clearAll} disabled={disabled}>
-          Reset all walls
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {onOpeningsChange ? (
+            <button
+              className="btn secondary"
+              type="button"
+              onClick={() => setEditOpenings((v) => !v)}
+              disabled={disabled}
+              title="If auto-detected openings are wrong, edit them here."
+            >
+              {editOpenings ? "Done editing openings" : "Edit openings"}
+            </button>
+          ) : null}
+          <button className="btn secondary" onClick={clearAll} disabled={disabled} type="button">
+            Reset all walls
+          </button>
+        </div>
       </div>
 
       {placementWarning ? (
         <div className="wlPlacementWarn" role="alert">
           {placementWarning}
+        </div>
+      ) : null}
+
+      {editOpenings && onOpeningsChange ? (
+        <div className="wlOpeningAdder" role="group" aria-label="Add a missing opening">
+          <div className="smallTitle" style={{ marginBottom: 6 }}>
+            Add missing opening
+          </div>
+          <div className="wlOpeningAdderRow">
+            <input
+              className="wlOpeningInput"
+              value={newOpeningText}
+              onChange={(e) => setNewOpeningText(e.target.value)}
+              placeholder='e.g. "window, centered" or "swing door to Toilet, right side of wall"'
+              disabled={disabled}
+            />
+            <select
+              className="wlOpeningSelect"
+              value={newOpeningWall}
+              onChange={(e) => setNewOpeningWall(String(e.target.value) as WallId)}
+              disabled={disabled}
+              aria-label="Wall"
+            >
+              <option value="north">North</option>
+              <option value="east">East</option>
+              <option value="south">South</option>
+              <option value="west">West</option>
+            </select>
+            <button className="btn secondary" type="button" onClick={addOpening} disabled={disabled || !newOpeningText.trim()}>
+              Add
+            </button>
+          </div>
+          <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>
+            Tip: keep the wording short. If you include "door/window/sliding" it helps the space checker.
+          </div>
         </div>
       ) : null}
 
@@ -523,8 +619,28 @@ function WallLayout(props: {
                     <span className="wlOpeningLabel">Openings</span>
                     <div className="wlChips">
                       {(openings![w.id] ?? []).map((op) => (
-                        <span className="wlChip wlOpeningChip" key={op}>
-                          {op}
+                        <span className="wlChip wlOpeningChip wlOpeningChipWrap" key={op}>
+                          <span className="wlOpeningText">{op}</span>
+                          {editOpenings && onOpeningsChange ? (
+                            <span className="wlOpeningEdit">
+                              <select
+                                className="wlOpeningSelect"
+                                value={w.id}
+                                onChange={(e) => {
+                                  const v = String(e.target.value) as WallId | "remove";
+                                  if (v === "remove") removeOpening(op, w.id);
+                                  else moveOpening(op, w.id, v);
+                                }}
+                                disabled={disabled}
+                              >
+                                <option value="north">North</option>
+                                <option value="east">East</option>
+                                <option value="south">South</option>
+                                <option value="west">West</option>
+                                <option value="remove">Remove</option>
+                              </select>
+                            </span>
+                          ) : null}
                         </span>
                       ))}
                     </div>
@@ -590,7 +706,408 @@ function WallLayout(props: {
   );
 }
 
+function MoodboardTab() {
+  const [mbBrief, setMbBrief] = useState<Record<string, unknown>>(makeDefaultBrief());
+  const [mbFloorplanRefs, setMbFloorplanRefs] = useState<UploadedRef[]>([]);
+  const [mbStyleRefs, setMbStyleRefs] = useState<UploadedRef[]>([]);
+  const [mbProcessing, setMbProcessing] = useState(false);
+  const [mbSyncing, setMbSyncing] = useState(false);
+  const [mbBusy, setMbBusy] = useState(false);
+  const [mbError, setMbError] = useState<string | null>(null);
+  const [mbPanels, setMbPanels] = useState<MoodboardWallPanel[]>([]);
+  const [mbVariantsPerWall, setMbVariantsPerWall] = useState(3);
+  const [mbGenStatus, setMbGenStatus] = useState("");
+
+  const mbRooms = useMemo(() => {
+    const rooms = (mbBrief as any)?.rooms_detected;
+    return Array.isArray(rooms) ? rooms : [];
+  }, [mbBrief]);
+
+  const mbSelectedRoomId = useMemo(() => {
+    const rawId = String((mbBrief as any)?.selected_room_id ?? "").trim();
+    if (rawId && mbRooms.some((r: any) => String(r?.id) === rawId)) return rawId;
+    const name = String((mbBrief as any)?.selected_room_name ?? "").trim();
+    if (name) {
+      const byName = mbRooms.find((r: any) => String(r?.name ?? "").trim().toLowerCase() === name.toLowerCase());
+      if (byName?.id) return String(byName.id);
+    }
+    return rawId;
+  }, [mbBrief, mbRooms]);
+
+  const mbFloorplanImages: ImagePayload[] = useMemo(
+    () => mbFloorplanRefs.map((r) => ({ mime_type: r.mime_type, data_base64: r.data_base64 })),
+    [mbFloorplanRefs],
+  );
+
+  async function mbToUploadedRefs(files: FileList | null, limit: number) {
+    if (!files?.length) return [];
+    const picked = Array.from(files).slice(0, limit);
+    return Promise.all(
+      picked.map(
+        (f) =>
+          new Promise<UploadedRef>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(reader.error);
+            reader.onload = () => {
+              const dataUrl = String(reader.result || "");
+              resolve({
+                id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+                name: f.name,
+                mime_type: f.type || "image/png",
+                preview_data_url: dataUrl,
+                data_base64: stripDataUrlPrefix(dataUrl),
+              });
+            };
+            reader.readAsDataURL(f);
+          }),
+      ),
+    );
+  }
+
+  async function mbSyncIntake(nextBrief: Record<string, unknown>) {
+    if (!mbFloorplanRefs.length) return;
+    setMbSyncing(true);
+    setMbBusy(true);
+    setMbError(null);
+    try {
+      const fp = mbFloorplanRefs.map((r) => ({ mime_type: r.mime_type, data_base64: r.data_base64 }));
+      const style = mbStyleRefs.map((r) => ({ mime_type: r.mime_type, data_base64: r.data_base64 }));
+      const resp = await postIntake({
+        brief: nextBrief,
+        chat_history: [],
+        context_images: [...fp, ...style],
+        floorplan_images: fp,
+        max_questions: 0,
+      });
+      setMbBrief(resp.updated_brief as Record<string, unknown>);
+    } catch (e: any) {
+      setMbError(e?.message ?? String(e));
+    } finally {
+      setMbSyncing(false);
+      setMbBusy(false);
+    }
+  }
+
+  async function onPickMbFloorplan(files: FileList | null) {
+    setMbError(null);
+    const converted = await mbToUploadedRefs(files, 1);
+    if (!converted.length) return;
+    setMbFloorplanRefs(converted);
+    setMbProcessing(true);
+    setMbPanels([]);
+    const nextBrief = {
+      ...makeDefaultBrief(),
+      rooms_detected: [],
+      selected_room_id: null,
+      selected_room_name: null,
+      wall_assignments: { ...EMPTY_WALL_ASSIGNMENTS },
+      wall_openings: { ...EMPTY_WALL_ASSIGNMENTS },
+    };
+    setMbBrief(nextBrief);
+    try {
+      const fp = converted.map((r) => ({ mime_type: r.mime_type, data_base64: r.data_base64 }));
+      const resp = await postIntake({
+        brief: nextBrief,
+        chat_history: [],
+        context_images: fp,
+        floorplan_images: fp,
+        max_questions: 0,
+      });
+      setMbBrief(resp.updated_brief as Record<string, unknown>);
+    } catch (e: any) {
+      setMbError(e?.message ?? String(e));
+    } finally {
+      setMbProcessing(false);
+    }
+  }
+
+  function mbApplyRoom(room: { id?: string; name?: string; length_m?: number; width_m?: number } | null) {
+    const rawLn = room?.length_m != null ? Number(room.length_m) : null;
+    const rawWd = room?.width_m != null ? Number(room.width_m) : null;
+    const { lengthM, widthM } = normalizeDimsToMetres(rawLn, rawWd);
+    const next: Record<string, unknown> = {
+      ...mbBrief,
+      selected_room_id: room?.id ?? null,
+      selected_room_name: room?.name ?? null,
+      space_type: room?.name ?? null,
+      room_length_m: lengthM,
+      room_width_m: widthM,
+      wall_assignments: { ...EMPTY_WALL_ASSIGNMENTS },
+      wall_openings: { ...EMPTY_WALL_ASSIGNMENTS },
+    };
+    setMbBrief(next);
+    setMbPanels([]);
+    if (mbFloorplanRefs.length && room?.id) void mbSyncIntake(next);
+  }
+
+  async function onGenerateWallMoodboard() {
+    if (!(mbBrief as any)?.selected_room_id) {
+      setMbError("Select a room from the floor plan first.");
+      return;
+    }
+    setMbBusy(true);
+    setMbError(null);
+    setMbPanels([]);
+    setMbGenStatus("Planning panels per wall…");
+    try {
+      const style = mbStyleRefs.map((r) => ({ mime_type: r.mime_type, data_base64: r.data_base64 }));
+      const resp = await postMoodboardWalls({
+        brief: mbBrief,
+        floorplan_images: mbFloorplanImages,
+        context_images: style,
+        variants_per_wall: mbVariantsPerWall,
+      });
+      setMbBrief(resp.updated_brief as Record<string, unknown>);
+      setMbPanels(resp.panels ?? []);
+      setMbGenStatus("");
+    } catch (e: any) {
+      setMbError(e?.message ?? String(e));
+      setMbGenStatus("");
+    } finally {
+      setMbBusy(false);
+    }
+  }
+
+  function onResetMb() {
+    setMbBrief(makeDefaultBrief());
+    setMbFloorplanRefs([]);
+    setMbStyleRefs([]);
+    setMbPanels([]);
+    setMbError(null);
+    setMbGenStatus("");
+  }
+
+  const canGenerateMb = Boolean((mbBrief as any)?.selected_room_id) && !mbBusy && !mbSyncing && !mbProcessing;
+
+  return (
+    <div className="moodboardPanel">
+      <section className="card">
+        <div className="cardTitle">1. Upload floor plan</div>
+        <p className="muted" style={{ marginBottom: 10 }}>
+          We scan the plan, list all rooms, then you pick one area (like the Mr Dileep moodboard deck — one section per
+          wall).
+        </p>
+        <div className="uploadRow">
+          <label className="fileBtn">
+            <input type="file" accept="image/*" onChange={(e) => onPickMbFloorplan(e.target.files)} disabled={mbBusy} />
+            Add floor plan
+          </label>
+          {mbFloorplanRefs.length ? (
+            <button className="btn secondary" type="button" onClick={() => setMbFloorplanRefs([])} disabled={mbBusy}>
+              Clear plan
+            </button>
+          ) : null}
+        </div>
+        {mbFloorplanRefs.length ? (
+          <div className="thumbs fpThumbs">
+            {mbFloorplanRefs.map((r) => (
+              <div className="thumb" key={r.id}>
+                <img className="thumbImg" src={r.preview_data_url} alt={r.name} />
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {mbProcessing ? (
+          <div className="planSyncLoader" role="status">
+            <div className="spinner" aria-hidden="true" />
+            <div className="planSyncLoaderTitle">Scanning floor plan for rooms…</div>
+          </div>
+        ) : null}
+      </section>
+
+      {mbRooms.length > 0 ? (
+        <section className="card" style={{ marginTop: 14 }}>
+          <div className="cardTitle">2. Select room / area</div>
+          <select
+            className="select"
+            value={mbSelectedRoomId}
+            onChange={(e) => {
+              const id = e.target.value || null;
+              const room = mbRooms.find((x: any) => String(x?.id) === String(id)) ?? null;
+              mbApplyRoom(room as { id?: string; name?: string; length_m?: number; width_m?: number });
+            }}
+            disabled={mbBusy}
+          >
+            <option value="">Select room…</option>
+            {mbRooms.map((r: any) => (
+              <option key={String(r.id)} value={String(r.id)}>
+                {String(r.name)}
+                {r.length_m && r.width_m ? ` (${r.length_m}m × ${r.width_m}m)` : ""}
+              </option>
+            ))}
+          </select>
+          {mbSyncing ? (
+            <div className="planSyncLoader" role="status" style={{ marginTop: 10 }}>
+              <div className="spinner" aria-hidden="true" />
+              <div className="muted planSyncLoaderSub">Detecting wall structure (doors/windows per N/E/S/W)…</div>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
+      {(mbBrief as any)?.selected_room_id && !mbSyncing ? (
+        <section className="card" style={{ marginTop: 14 }}>
+          <div className="cardTitle">3. Wall structure & furniture</div>
+          <p className="muted" style={{ marginBottom: 10 }}>
+            Openings come from the plan. Click each wall to place items (sofa, TV, wardrobe, etc.). Leave empty and we
+            will suggest components when generating.
+          </p>
+          <WallLayout
+            key={String((mbBrief as any).selected_room_id)}
+            brief={mbBrief}
+            assignments={((mbBrief as any).wall_assignments as WallAssignments) || { ...EMPTY_WALL_ASSIGNMENTS }}
+            openings={((mbBrief as any).wall_openings as WallAssignments) || { ...EMPTY_WALL_ASSIGNMENTS }}
+            items={WALL_ITEMS_BY_ROOM[resolveRoomItemKey(mbBrief)] || WALL_ITEMS_BY_ROOM.bedroom}
+            roomLabel={String((mbBrief as any).selected_room_name || "Room")}
+            disabled={mbBusy}
+            onChange={(next) => setMbBrief((b) => ({ ...b, wall_assignments: next }))}
+            onOpeningsChange={(next) => setMbBrief((b) => ({ ...b, wall_openings: next }))}
+          />
+        </section>
+      ) : null}
+
+      <section className="card" style={{ marginTop: 14 }}>
+        <div className="cardTitle">4. Style & generate</div>
+        <SpeechInput
+          label="Style direction"
+          placeholder="e.g. Modern minimal oak, warm neutrals, Japandi…"
+          value={String(mbBrief.style_direction ?? "")}
+          onChange={(text) => setMbBrief((b) => ({ ...b, style_direction: text.trim() || null }))}
+          disabled={mbBusy}
+        />
+        <SpeechInput
+          label="Notes"
+          placeholder="Budget band, materials, mood…"
+          value={String(mbBrief.notes ?? "")}
+          onChange={(text) => setMbBrief((b) => ({ ...b, notes: text }))}
+          disabled={mbBusy}
+        />
+        <SpeechInput
+          label="Floor furniture (optional override)"
+          placeholder="e.g. 8-seat dining table, chairs, center rug — auto-filled for Dining if left blank"
+          value={
+            Array.isArray((mbBrief as any).moodboard_floor_items)
+              ? ((mbBrief as any).moodboard_floor_items as string[]).join("; ")
+              : ""
+          }
+          onChange={(text) => {
+            const items = text
+              .split(/[;\n,]+/)
+              .map((s) => s.trim())
+              .filter(Boolean);
+            setMbBrief((b) => ({
+              ...b,
+              moodboard_floor_items: items.length ? items : undefined,
+            }));
+          }}
+          disabled={mbBusy}
+        />
+        <p className="muted" style={{ marginTop: 6, fontSize: 12 }}>
+          Wall panels stay accurate; we also generate a <strong>floor layout</strong> section (table, bed, coffee
+          table, etc.) so center items are not missing.
+        </p>
+        <div className="uploadRow" style={{ marginTop: 10 }}>
+          <label className="fileBtn">
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              disabled={mbBusy}
+              onChange={async (e) => {
+                const c = await mbToUploadedRefs(e.target.files, 6);
+                if (c.length) setMbStyleRefs((p) => [...p, ...c].slice(0, 6));
+              }}
+            />
+            Style reference photos
+          </label>
+        </div>
+        <div className="uploadRow" style={{ marginTop: 10 }}>
+          <div className="uploadMeta">
+            <div className="smallTitle">Variants per wall</div>
+            <div className="muted">3–4 images with different component mixes (sofa vs sectional, etc.)</div>
+          </div>
+          <select
+            className="select"
+            value={mbVariantsPerWall}
+            onChange={(e) => setMbVariantsPerWall(Number(e.target.value))}
+            disabled={mbBusy}
+          >
+            <option value={3}>3</option>
+            <option value={4}>4</option>
+          </select>
+        </div>
+        <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn secondary" type="button" onClick={onResetMb} disabled={mbBusy}>
+            Reset moodboard
+          </button>
+          <button className="btn primary" type="button" onClick={onGenerateWallMoodboard} disabled={!canGenerateMb}>
+            {mbBusy ? "Generating…" : "Generate wall moodboard"}
+          </button>
+        </div>
+        {mbGenStatus ? <p className="muted" style={{ marginTop: 8 }}>{mbGenStatus}</p> : null}
+        {mbBusy && !mbPanels.length ? (
+          <p className="muted" style={{ marginTop: 8 }}>
+            Creating {mbVariantsPerWall} options per wall — this can take several minutes.
+          </p>
+        ) : null}
+        {mbError ? (
+          <div className="error" style={{ marginTop: 12 }}>
+            <div className="errorTitle">Error</div>
+            <pre className="errorBody">{mbError}</pre>
+          </div>
+        ) : null}
+      </section>
+
+      {mbPanels.length > 0 ? (
+        <section className="card" style={{ marginTop: 14 }}>
+          <div className="cardTitle">Wall moodboard panels</div>
+          {mbPanels.map((panel) => (
+            <div className="mbWallSection" key={panel.zone_id}>
+              <div className="smallTitle">
+                {panel.title}{" "}
+                <span className="pill neutral">{panel.zone_id.toUpperCase()}</span>
+              </div>
+              {panel.openings_summary ? <p className="muted">{panel.openings_summary}</p> : null}
+              <div className="images mbVariantGrid">
+                {panel.variants.map((v, vi) => (
+                  <div className="imgWrap" key={`${panel.zone_id}-${vi}`}>
+                    {v.image_base64_png ? (
+                      <img className="img" src={b64ToDataUrlPng(v.image_base64_png)} alt={v.label} />
+                    ) : (
+                      <div className="empty">Image not generated</div>
+                    )}
+                    <div className="smallTitle">{v.label}</div>
+                    {v.components.length ? (
+                      <div className="wlChips" style={{ marginBottom: 6 }}>
+                        {v.components.map((c) => (
+                          <span className="wlChip" key={c}>
+                            {c.replace(/_/g, " ")}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    {v.image_base64_png ? (
+                      <a
+                        className="download"
+                        href={b64ToDataUrlPng(v.image_base64_png)}
+                        download={`moodboard_${panel.zone_id}_${vi + 1}.png`}
+                      >
+                        Download PNG
+                      </a>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
 export function App() {
+  const [activeTab, setActiveTab] = useState<AppTab>("design");
   const [brief, setBrief] = useState<Record<string, unknown>>(makeDefaultBrief());
   const [chat, setChat] = useState<ChatMessage[]>([
     {
@@ -1038,28 +1555,55 @@ export function App() {
         <div>
           <div className="title">Interior Copilot</div>
           <div className="subtitle">
-            Follow the steps in order — each unlocks the next until you generate designs.
+            {activeTab === "design"
+              ? "Follow the steps in order — each unlocks the next until you generate designs."
+              : "Upload a plan → pick a room → detect walls → generate 3–4 options per wall (Mr Dileep style)."}
           </div>
         </div>
-        <div className="headerActions">
-          <button className="btn secondary" onClick={onReset} disabled={isBusy}>
-            Reset
-          </button>
-          <button
-            className="btn primary"
-            onClick={onGenerate}
-            disabled={isBusy || !workflow.canGenerate}
-            title={
-              workflow.canGenerate
-                ? undefined
-                : "Complete earlier steps and finish the brief in chat (step 5) first."
-            }
-          >
-            Generate designs
-          </button>
-        </div>
+        {activeTab === "design" ? (
+          <div className="headerActions">
+            <button className="btn secondary" onClick={onReset} disabled={isBusy}>
+              Reset
+            </button>
+            <button
+              className="btn primary"
+              onClick={onGenerate}
+              disabled={isBusy || !workflow.canGenerate}
+              title={
+                workflow.canGenerate
+                  ? undefined
+                  : "Complete earlier steps and finish the brief in chat (step 5) first."
+              }
+            >
+              Generate designs
+            </button>
+          </div>
+        ) : null}
       </header>
 
+      <nav className="appTabs" role="tablist" aria-label="Main sections">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "design"}
+          className={`appTab ${activeTab === "design" ? "active" : ""}`}
+          onClick={() => setActiveTab("design")}
+        >
+          Design workflow
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "moodboard"}
+          className={`appTab ${activeTab === "moodboard" ? "active" : ""}`}
+          onClick={() => setActiveTab("moodboard")}
+        >
+          Moodboard
+        </button>
+      </nav>
+
+      {activeTab === "design" ? (
+        <>
       <section className="card wfOverviewCard">
         <WorkflowStepper steps={workflow.steps} activeStepId={workflow.activeStepId} />
       </section>
@@ -1308,6 +1852,12 @@ export function App() {
                   wall_assignments: next,
                 }))
               }
+              onOpeningsChange={(next) =>
+                setBrief((b) => ({
+                  ...b,
+                  wall_openings: next,
+                }))
+              }
             />
           ) : null}
           {!hasFloorPlan ? (
@@ -1516,6 +2066,10 @@ export function App() {
         </WorkflowSection>
 
       </div>
+        </>
+      ) : (
+        <MoodboardTab />
+      )}
 
       {floorplanPreview ? (
         <div

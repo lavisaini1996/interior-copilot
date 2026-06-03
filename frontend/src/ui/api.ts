@@ -13,6 +13,26 @@ export type MoodboardResponse = {
   images_base64_png: string[];
 };
 
+export type MoodboardVariant = {
+  label: string;
+  components: string[];
+  prompt: string;
+  image_base64_png?: string | null;
+};
+
+export type MoodboardWallPanel = {
+  zone_id: string;
+  zone_type: string;
+  title: string;
+  openings_summary: string;
+  variants: MoodboardVariant[];
+};
+
+export type MoodboardWallsResponse = {
+  updated_brief: Record<string, unknown>;
+  panels: MoodboardWallPanel[];
+};
+
 export type DesignItem = { id: string; name: string; category: string; price: number };
 export type DesignMaterialLine = {
   material_id: string;
@@ -137,6 +157,29 @@ export async function postMoodboard(params: {
     throw new Error(text || `HTTP ${res.status}`);
   }
   return (await res.json()) as MoodboardResponse;
+}
+
+export async function postMoodboardWalls(params: {
+  brief: Record<string, unknown>;
+  floorplan_images?: ImagePayload[];
+  context_images?: ImagePayload[];
+  variants_per_wall?: number;
+}): Promise<MoodboardWallsResponse> {
+  const res = await fetch(`${API_BASE}/api/moodboard/walls`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      brief: params.brief,
+      floorplan_images: params.floorplan_images ?? [],
+      context_images: params.context_images ?? [],
+      variants_per_wall: params.variants_per_wall ?? 3,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+  return (await res.json()) as MoodboardWallsResponse;
 }
 
 export async function postDesigns(params: {

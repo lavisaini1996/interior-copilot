@@ -53,6 +53,66 @@ body {
   gap: 10px;
 }
 
+.appTabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 4px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  width: fit-content;
+}
+
+.appTab {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.appTab:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.appTab.active {
+  color: var(--text);
+  background: rgba(124, 92, 255, 0.18);
+  border-color: rgba(124, 92, 255, 0.45);
+}
+
+.moodboardPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.mbWallSection {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--border);
+}
+
+.mbWallSection:first-of-type {
+  margin-top: 8px;
+  padding-top: 0;
+  border-top: none;
+}
+
+.mbVariantGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
 .grid {
   display: grid;
   grid-template-columns: 1.2fr 1fr;
@@ -366,6 +426,57 @@ body {
 .wlOpeningChip {
   border-color: rgba(35, 194, 162, 0.35);
   background: rgba(35, 194, 162, 0.12);
+}
+
+.wlOpeningChipWrap {
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wlOpeningText {
+  max-width: 520px;
+  white-space: normal;
+  line-height: 1.25;
+}
+
+.wlOpeningEdit {
+  display: inline-flex;
+  align-items: center;
+}
+
+.wlOpeningSelect {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.wlOpeningAdder {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 12px;
+}
+
+.wlOpeningAdderRow {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.wlOpeningInput {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 13px;
 }
 
 .wlPlacementWarn {
