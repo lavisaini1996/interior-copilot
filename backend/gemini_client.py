@@ -15,6 +15,7 @@ from google.genai import types
 
 from backend.catalog import Catalog, load_catalog
 from backend.http_errors import is_network_error
+from backend.moodboard_walls import moodboard_plan_schema
 from backend.wall_placement import build_layout_qa_checklist
 
 logger = logging.getLogger("interior_copilot.gemini")
@@ -323,6 +324,7 @@ def extract_wall_openings_from_floorplan(
     floorplan_images: List[Dict[str, str]],
     target_room_id: str | None = None,
     target_room_name: str | None = None,
+    rooms_detected: List[Dict[str, Any]] | None = None,
     north_from_image_up_clockwise_deg: float = 0.0,
 ) -> Dict[str, Any]:
     """
@@ -343,6 +345,15 @@ def extract_wall_openings_from_floorplan(
     system = (
         "You read architectural floor plans. Identify DOORS and WINDOWS (and balcony sliders / glazed doors) on the "
         "TARGET ROOM's boundary walls only.\n"
+        "\n"
+        "CRITICAL: The plan has multiple rooms. You MUST first find the exact target room by reading the room label text "
+        "(e.g. 'BED ROOM -1' vs 'BED ROOM -2' vs 'M.BED ROOM'). If you cannot confidently find the exact label for the target "
+        "room, return empty lists for all walls and explain in notes. Do NOT guess.\n"
+        "CRITICAL: Only include openings that TOUCH the target room's perimeter wall. Never include openings from adjacent rooms, "
+        "even if they are nearby.\n"
+        "CRITICAL: You will be given a list of detected room labels. Any opening destination you mention (e.g. 'to Toilet 5'0\"×9'0\"') "
+        "MUST match one of those labels, and it MUST be a room that shares a boundary with the target room. If it doesn't share a wall, "
+        "exclude it.\n"
         "Step 1 — Find plan NORTH from the north arrow, letter N, or compass rose ON THE DRAWING (primary source).\n"
         "Step 2 — Locate the target room (match target_room_name / id).\n"
         "Step 3 — For each opening on that room's perimeter, assign north/south/east/west using the sheet's north arrow.\n"
@@ -355,6 +366,9 @@ def extract_wall_openings_from_floorplan(
         "- position on that wall (left / center / right OR upper / lower half)\n"
         "Examples: 'swing door to Walk-in Closet, left side of wall'; 'swing door to Hallway, upper half'; "
         "'two-panel sliding glass door to Balcony, centered'.\n"
+        "\n"
+        "Self-check before output: verify every opening you list is physically drawn on the boundary of the target room label you found. "
+        "If an opening is on a different room (e.g. Dining balcony slider), do not include it.\n"
         "Do not invent openings. Do not move a door to a different wall than drawn. Empty array if none on that wall.\n"
         "Output ONLY valid JSON matching the schema."
     )
@@ -362,6 +376,8 @@ def extract_wall_openings_from_floorplan(
     schema: Dict[str, Any] = {
         "type": "object",
         "properties": {
+            "target_room_label_found": {"type": "boolean"},
+            "target_room_label_text": {"type": "string"},
             "wall_openings": {
                 "type": "object",
                 "properties": {
@@ -374,13 +390,14 @@ def extract_wall_openings_from_floorplan(
             },
             "notes": {"type": "string"},
         },
-        "required": ["wall_openings", "notes"],
+        "required": ["target_room_label_found", "target_room_label_text", "wall_openings", "notes"],
     }
 
     payload = {
         "task": "extract_doors_windows_per_wall",
         "target_room_id": target_room_id,
         "target_room_name": target_room_name,
+        "rooms_detected": rooms_detected or [],
         "north_from_image_up_clockwise_deg": d,
     }
 
@@ -566,6 +583,59 @@ def generate_moodboard_prompts(
     return prompts[:n]
 
 
+def plan_moodboard_wall_panels(
+    *,
+    cfg: GeminiConfig,
+    brief: Dict[str, Any],
+    variants_per_wall: int = 3,
+    context_images: List[Dict[str, str]] | None = None,
+) -> Dict[str, Any]:
+    """
+    Plan Mr Dileep–style moodboard: one section per compass wall (and ceiling/overview when relevant),
+    each with 3–4 component variants and photorealistic image prompts.
+    """
+    n_var = max(1, min(4, int(variants_per_wall)))
+    room = str(brief.get("selected_room_name") or brief.get("space_type") or "room").strip()
+    system = (
+        "You plan interior design moodboards like a professional furniture layout deck (one slide per wall/zone).\n"
+        "Example slide titles: 'Living Sofa back wall', 'TV Base Unit', 'Dining wall storage', 'Dining table layout', "
+        "'Kitchen Ceiling', 'Mbr Tv unit'.\n"
+        "Given a room brief with compass wall assignments and openings from a floor plan, produce panels for:\n"
+        "- Each compass wall (north, south, east, west) that has furniture assignments, openings, or is essential for that room type.\n"
+        "- REQUIRED zone_id 'floor' (zone_type 'floor') for dining, living, bedroom, kitchen, study — title like "
+        "'Dining table layout' or 'Center floor layout'. Variants show different floor furniture (table shape, chair count, rug).\n"
+        "- Optional zone_id 'ceiling' (false ceiling / lighting); zone_id 'overview' only if useful.\n"
+        f"For each panel include exactly {n_var} variants — different component mixes appropriate for that wall/zone.\n"
+        "CRITICAL — floor furniture standards:\n"
+        "- Dining room MUST include dining table + chairs on the floor in floor panel AND visible in wide wall shots.\n"
+        "- Living MUST include coffee table + rug on the floor.\n"
+        "- Bedroom MUST include bed on the floor plane.\n"
+        "- List these in suggested_floor_items and mention them in every image_prompt.\n"
+        "Wall panel image_prompts: wide angle so the assigned wall is hero BUT mandatory floor items remain visible "
+        "in the center/foreground (never an empty floor in a dining room).\n"
+        "Floor panel image_prompts: full floor layout, hero = center furniture (table, bed, seating group).\n"
+        "If brief.wall_assignments are all empty, fill suggested_wall_assignments with sensible defaults.\n"
+        "Output ONLY valid JSON matching the schema."
+    )
+    payload = {
+        "brief": brief,
+        "room_name": room,
+        "variants_per_panel": n_var,
+        "zone_ids": ["north", "south", "east", "west", "ceiling", "overview"],
+    }
+    obj = _generate_json(
+        cfg=cfg,
+        system_text=system,
+        user_json_payload=payload,
+        context_images=context_images,
+        schema=moodboard_plan_schema(),
+        temperature=0.55,
+    )
+    if not isinstance(obj, dict):
+        raise RuntimeError(f"Unexpected moodboard plan shape: {obj}")
+    return obj
+
+
 def _extract_image_bytes_from_content_response(resp: Any) -> List[bytes]:
     out: List[bytes] = []
     for cand in resp.candidates or []:
@@ -705,8 +775,8 @@ def score_render_wall_layout(
         "rendered interior image.\n"
         "Task: score how well the IMAGE matches the LOCKED LAYOUT (0=wrong layout, 10=perfect).\n"
         "Fail (ok=false, score<=7) if any hero item is on the wrong wall or doors/windows are on the wrong wall.\n"
-        "CRITICAL: If the bed is assigned to the NORTH wall (far/deep wall when viewing from the south doorway), "
-        "fail when the bed headboard is on the left (west) or right (east) side wall instead of the far wall.\n"
+        "CRITICAL: Use the LOCKED LAYOUT's spatial map to determine which wall is back/left/right in the photo. "
+        "Fail when the bed headboard is not flush on the assigned NORTH wall (wherever NORTH appears in the spatial map).\n"
         "CRITICAL: If the TV is assigned to the WEST wall, fail when the TV is not on the left wall.\n"
         "CRITICAL: If a window is labeled centered on the NORTH wall, fail when it is a narrow strip to the left/right "
         "of the bed instead of centered on the far wall.\n"

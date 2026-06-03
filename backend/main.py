@@ -26,6 +26,13 @@ from backend.llm import (
     generate_catalog_designs,
     generate_images,
     generate_moodboard_prompts,
+    plan_moodboard_wall_panels,
+)
+from backend.moodboard_walls import (
+    enrich_moodboard_image_prompt,
+    ensure_floor_panel,
+    merge_suggested_assignments,
+    merge_suggested_floor_items,
 )
 from backend.gemini_client import score_render_wall_layout
 from backend.catalog import load_catalog
@@ -766,6 +773,34 @@ class GenerateResponse(BaseModel):
     prompts: List[str]
     images_base64_png: List[str]
 
+
+class MoodboardWallsRequest(BaseModel):
+    brief: Dict[str, Any]
+    floorplan_images: List[ImagePayload] = Field(default_factory=list)
+    context_images: List[ImagePayload] = Field(default_factory=list)
+    variants_per_wall: int = Field(default=3, ge=1, le=4)
+
+
+class MoodboardVariantOut(BaseModel):
+    label: str
+    components: List[str] = Field(default_factory=list)
+    prompt: str
+    image_base64_png: str | None = None
+
+
+class MoodboardWallPanelOut(BaseModel):
+    zone_id: str
+    zone_type: str
+    title: str
+    openings_summary: str = ""
+    variants: List[MoodboardVariantOut] = Field(default_factory=list)
+
+
+class MoodboardWallsResponse(BaseModel):
+    updated_brief: Dict[str, Any]
+    panels: List[MoodboardWallPanelOut]
+
+
 class DesignMaterialLine(BaseModel):
     material_id: str
     name: str
@@ -833,6 +868,8 @@ def intake(req: IntakeRequest) -> IntakeResponse:
         cfg = env_config()
         merged_brief = _merge_brief(req.brief)
         floor_imgs = [img.model_dump() for img in req.floorplan_images]
+        force_refresh_north = _env_flag("INTAKE_REFRESH_NORTH")
+        force_refresh_openings = _env_flag("INTAKE_REFRESH_OPENINGS")
 
         existing_rooms = merged_brief.get("rooms_detected") or []
         has_rooms = isinstance(existing_rooms, list) and len(existing_rooms) > 0
@@ -852,7 +889,11 @@ def intake(req: IntakeRequest) -> IntakeResponse:
             except Exception:
                 pass
 
-        skip_north = economy_mode() and merged_brief.get("floorplan_north_has_indicator")
+        skip_north = (
+            (not force_refresh_north)
+            and economy_mode()
+            and merged_brief.get("floorplan_north_has_indicator")
+        )
         if floor_imgs and not skip_north:
             try:
                 north_raw = extract_plan_north_from_floorplan(cfg=cfg, floorplan_images=floor_imgs)
@@ -862,7 +903,11 @@ def intake(req: IntakeRequest) -> IntakeResponse:
 
         merged_brief["floorplan_north_clockwise_deg"] = _north_deg_from_brief(merged_brief)
         rid_o, rnm_o = _room_target_for_openings(merged_brief)
-        refresh_openings = not economy_mode() or not _openings_populated(merged_brief)
+        refresh_openings = (
+            force_refresh_openings
+            or (not economy_mode())
+            or (not _openings_populated(merged_brief))
+        )
         if refresh_openings:
             merged_brief["wall_openings"] = dict(_EMPTY_WALL_OPENINGS)
         if floor_imgs and (rnm_o or rid_o) and refresh_openings:
@@ -872,6 +917,7 @@ def intake(req: IntakeRequest) -> IntakeResponse:
                     floorplan_images=floor_imgs,
                     target_room_id=rid_o,
                     target_room_name=rnm_o,
+                    rooms_detected=merged_brief.get("rooms_detected") or [],
                     north_from_image_up_clockwise_deg=float(merged_brief["floorplan_north_clockwise_deg"]),
                 )
                 merged_brief["wall_openings"] = _normalize_wall_openings(
@@ -918,6 +964,120 @@ def moodboard(req: GenerateRequest) -> GenerateResponse:
         raise
     except Exception as e:
         logger.error("Moodboard failed:\n%s", traceback.format_exc())
+        raise http_exception_from_llm_error(e) from e
+
+
+@app.post("/api/moodboard/walls", response_model=MoodboardWallsResponse)
+def moodboard_walls(req: MoodboardWallsRequest) -> MoodboardWallsResponse:
+    """
+    Floor-plan moodboard: plan one panel per wall/zone (Mr Dileep style), then render 3–4 variants each.
+    """
+    try:
+        cfg = env_config()
+        merged_brief = _merge_brief(req.brief)
+        if not merged_brief.get("selected_room_id") and not merged_brief.get("selected_room_name"):
+            raise HTTPException(status_code=400, detail="Select a room from the floor plan first.")
+
+        fp_imgs = [img.model_dump() for img in req.floorplan_images]
+        ctx = [img.model_dump() for img in req.context_images]
+        context_for_plan = fp_imgs + ctx
+
+        plan_raw = plan_moodboard_wall_panels(
+            cfg=cfg,
+            brief=merged_brief,
+            variants_per_wall=req.variants_per_wall,
+            context_images=context_for_plan or None,
+        )
+        merged_brief = merge_suggested_assignments(
+            merged_brief, plan_raw.get("suggested_wall_assignments")
+        )
+        merged_brief = merge_suggested_floor_items(
+            merged_brief, plan_raw.get("suggested_floor_items")
+        )
+
+        raw_panels = plan_raw.get("panels")
+        if not isinstance(raw_panels, list):
+            raw_panels = []
+        raw_panels = ensure_floor_panel(
+            raw_panels, brief=merged_brief, variants_per_wall=req.variants_per_wall
+        )
+
+        panels_out: List[MoodboardWallPanelOut] = []
+        for raw in raw_panels:
+            if not isinstance(raw, dict):
+                continue
+            zone_id = str(raw.get("zone_id") or "").strip().lower()
+            if not zone_id:
+                continue
+            title = str(raw.get("title") or zone_id).strip()
+            zone_type = str(raw.get("zone_type") or "wall").strip()
+            openings_summary = str(raw.get("openings_summary") or "").strip()
+            variants_out: List[MoodboardVariantOut] = []
+            raw_vars = raw.get("variants")
+            if not isinstance(raw_vars, list):
+                continue
+            for rv in raw_vars[: req.variants_per_wall]:
+                if not isinstance(rv, dict):
+                    continue
+                label = str(rv.get("label") or "Option").strip()
+                comps_raw = rv.get("components")
+                components = (
+                    [str(c).strip() for c in comps_raw if isinstance(c, str) and str(c).strip()]
+                    if isinstance(comps_raw, list)
+                    else []
+                )
+                prompt = str(rv.get("image_prompt") or "").strip()
+                if not prompt:
+                    continue
+                prompt = enrich_moodboard_image_prompt(
+                    prompt,
+                    brief=merged_brief,
+                    zone_id=zone_id,
+                    zone_type=zone_type,
+                    components=components,
+                )
+                img_b64: str | None = None
+                try:
+                    imgs = generate_images(
+                        cfg=cfg,
+                        prompt=prompt,
+                        n=1,
+                        floorplan_images=fp_imgs or None,
+                    )
+                    if imgs:
+                        img_b64 = base64.b64encode(imgs[0]).decode("utf-8")
+                except Exception:
+                    logger.warning("Moodboard wall image failed for %s / %s", zone_id, label, exc_info=True)
+                variants_out.append(
+                    MoodboardVariantOut(
+                        label=label,
+                        components=components,
+                        prompt=prompt,
+                        image_base64_png=img_b64,
+                    )
+                )
+            if variants_out:
+                panels_out.append(
+                    MoodboardWallPanelOut(
+                        zone_id=zone_id,
+                        zone_type=zone_type,
+                        title=title,
+                        openings_summary=openings_summary,
+                        variants=variants_out,
+                    )
+                )
+
+        if not panels_out:
+            raise HTTPException(
+                status_code=502,
+                detail="Could not plan moodboard panels for this room. Add wall items or try again.",
+            )
+
+        return MoodboardWallsResponse(updated_brief=merged_brief, panels=panels_out)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Moodboard walls failed:\n%s", traceback.format_exc())
         raise http_exception_from_llm_error(e) from e
 
 

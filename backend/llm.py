@@ -81,6 +81,10 @@ def generate_moodboard_prompts(**kwargs: Any) -> Any:
     return _resolve().generate_moodboard_prompts(**kwargs)
 
 
+def plan_moodboard_wall_panels(**kwargs: Any) -> Any:
+    return _resolve().plan_moodboard_wall_panels(**kwargs)
+
+
 def generate_catalog_designs(**kwargs: Any) -> Any:
     return _resolve().generate_catalog_designs(**kwargs)
 

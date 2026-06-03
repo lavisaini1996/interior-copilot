@@ -246,6 +246,7 @@ def extract_wall_openings_from_floorplan(
     floorplan_images: List[Dict[str, str]],
     target_room_id: str | None = None,
     target_room_name: str | None = None,
+    rooms_detected: List[Dict[str, Any]] | None = None,
     north_from_image_up_clockwise_deg: float = 0.0,
 ) -> Dict[str, Any]:
     if not floorplan_images:
@@ -261,15 +262,25 @@ def extract_wall_openings_from_floorplan(
 
     system = (
         "You read architectural floor plans. Identify DOORS and WINDOWS on the TARGET ROOM's boundary walls only.\n"
+        "\n"
+        "CRITICAL: The plan has multiple rooms. You MUST first find the exact target room by reading the room label text "
+        "(e.g. 'BED ROOM -1' vs 'BED ROOM -2' vs 'M.BED ROOM'). If you cannot confidently find the exact label for the target "
+        "room, return empty lists for all walls and explain in notes. Do NOT guess.\n"
+        "CRITICAL: Only include openings that TOUCH the target room's perimeter wall. Never include openings from adjacent rooms.\n"
+        "CRITICAL: You will be given a list of detected room labels. Any opening destination you mention MUST match one of those labels "
+        "and it MUST be a room that shares a boundary with the target room. Otherwise exclude it.\n"
         "Use the north arrow / N label ON THE DRAWING as plan north. Assign each opening to north, south, east, or west.\n"
         f"If no north symbol on sheet, use hint: {d:.0f}° clockwise from image top to north. If arrow disagrees with hint, trust the arrow.\n"
         "Each phrase must include type, destination label from plan (e.g. to Hallway, to Walk-in Closet), and position on wall.\n"
+        "Self-check before output: verify every opening you list is physically drawn on the boundary of the target room label you found.\n"
         "Do not invent or move openings. Output ONLY valid JSON matching the schema."
     )
 
     schema: Dict[str, Any] = {
         "type": "object",
         "properties": {
+            "target_room_label_found": {"type": "boolean"},
+            "target_room_label_text": {"type": "string"},
             "wall_openings": {
                 "type": "object",
                 "properties": {
@@ -283,7 +294,7 @@ def extract_wall_openings_from_floorplan(
             },
             "notes": {"type": "string"},
         },
-        "required": ["wall_openings", "notes"],
+        "required": ["target_room_label_found", "target_room_label_text", "wall_openings", "notes"],
         "additionalProperties": False,
     }
 
@@ -291,6 +302,7 @@ def extract_wall_openings_from_floorplan(
         "task": "extract_doors_windows_per_wall",
         "target_room_id": target_room_id,
         "target_room_name": target_room_name,
+        "rooms_detected": rooms_detected or [],
         "north_from_image_up_clockwise_deg": d,
     }
 
@@ -522,6 +534,45 @@ def generate_moodboard_prompts(
     if not isinstance(prompts, list) or not all(isinstance(x, str) for x in prompts):
         raise RuntimeError(f"Unexpected prompts shape: {obj}")
     return prompts[:n]
+
+
+def plan_moodboard_wall_panels(
+    *,
+    cfg: OpenAIConfig,
+    brief: Dict[str, Any],
+    variants_per_wall: int = 3,
+    context_images: List[Dict[str, str]] | None = None,
+) -> Dict[str, Any]:
+    from backend.moodboard_walls import moodboard_plan_schema
+
+    n_var = max(1, min(4, int(variants_per_wall)))
+    room = str(brief.get("selected_room_name") or brief.get("space_type") or "room").strip()
+    system = (
+        "You plan interior design moodboards like a professional furniture layout deck (one slide per wall/zone). "
+        f"Produce panels per compass wall plus a REQUIRED 'floor' zone for dining/living/bedroom/kitchen with {n_var} variants. "
+        "Dining rooms must include dining table and chairs on the floor. Living needs coffee table and rug. "
+        "Wall shots must be wide enough to show floor furniture in the center, not wall-only elevations. "
+        "Fill suggested_floor_items. Output ONLY valid JSON matching the schema."
+    )
+    payload = {"brief": brief, "room_name": room, "variants_per_panel": n_var}
+    client = _client(cfg)
+    resp = client.responses.create(
+        model=cfg.text_model,
+        input=_build_vision_input(system_text=system, user_json_payload=payload, context_images=context_images),
+        temperature=0.55,
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "moodboard_wall_plan",
+                "schema": moodboard_plan_schema(),
+                "strict": True,
+            }
+        },
+    )
+    data = json.loads(resp.output_text or "{}")
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Unexpected moodboard plan shape: {data}")
+    return data
 
 
 def generate_images(

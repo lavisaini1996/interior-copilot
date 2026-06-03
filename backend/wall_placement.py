@@ -508,7 +508,18 @@ def _north_wall_has_bed(brief: Dict[str, Any]) -> bool:
 def _camera_pose(brief: Dict[str, Any]) -> str:
     """Pose key used for viewer-centric wall → frame mapping."""
     if _north_wall_has_bed(brief):
-        # View from south doorway toward north — bed on far wall, TV on left (west).
+        # If SOUTH has important openings (e.g. balcony/window), we must show BOTH north + south walls in-frame.
+        openings = brief.get("wall_openings") or {}
+        south_ops = []
+        if isinstance(openings, dict):
+            south_ops = openings.get("south") or []
+        if isinstance(south_ops, list) and any(
+            isinstance(x, str) and any(k in x.lower() for k in ("balcony", "sliding", "slider", "window", "glazed"))
+            for x in south_ops
+        ):
+            # In this pose: NORTH = left wall, SOUTH = right wall, EAST = back wall.
+            return "west_to_east"
+        # Default: view from south doorway toward north — bed on far wall.
         return "south_to_north"
 
     assignments = brief.get("wall_assignments") or {}
@@ -692,6 +703,15 @@ def _camera_instruction(brief: Dict[str, Any]) -> str:
     if not isinstance(assignments, dict):
         assignments = {}
     if _north_wall_has_bed(brief):
+        pose = _camera_pose(brief)
+        if pose == "west_to_east":
+            return (
+                "Wide-angle two-point perspective from the west corner looking toward the east wall, ~24mm, eye height ~1.5 m. "
+                "This is required because SOUTH has important openings (e.g. balcony/window) that must be visible. "
+                "In the frame: NORTH wall appears on the LEFT wall (bed headboard flush on that wall), "
+                "SOUTH wall appears on the RIGHT wall (show the south balcony/window there), "
+                "EAST wall is the FAR/BACK wall. Do not rotate/mirror the room."
+            )
         return (
             "Stand just inside the south hallway doorway (SOUTH wall — hallway door behind camera) "
             "looking north into the bedroom. Wide-angle ~24mm, eye height ~1.5 m. "
