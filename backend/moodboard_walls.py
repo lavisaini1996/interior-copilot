@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import logging
 import re
-from typing import Any, Dict, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Callable, Dict, List, Tuple
+
+logger = logging.getLogger("interior_copilot.moodboard_walls")
 
 WALL_ZONE_IDS = ("north", "south", "east", "west")
 EXTRA_ZONE_IDS = ("ceiling", "overview", "floor")
@@ -151,6 +156,12 @@ def enrich_moodboard_image_prompt(
     if notes:
         extra += f"\nNotes: {notes[:200]}."
 
+    extra += (
+        "\nOUTPUT: Plain full-bleed photorealistic interior photograph only — "
+        "no borders, titles, logos, material swatches, sidebar, or overlay text "
+        "(Material Board framing is added after generation)."
+    )
+
     base = (prompt or "").strip()
     if floor_block in base:
         return base
@@ -270,3 +281,66 @@ def merge_suggested_floor_items(brief: Dict[str, Any], suggested: Any) -> Dict[s
             out["moodboard_floor_items"] = items
             return out
     return brief
+
+
+MoodboardImageJob = Tuple[int, int, str]
+
+
+def prioritize_moodboard_image_jobs(jobs: List[MoodboardImageJob]) -> List[MoodboardImageJob]:
+    """Round-robin across panels so each wall gets at least one image when capped."""
+    by_panel: Dict[int, List[MoodboardImageJob]] = {}
+    for job in jobs:
+        panel_idx = job[0]
+        by_panel.setdefault(panel_idx, []).append(job)
+    if not by_panel:
+        return []
+    ordered: List[MoodboardImageJob] = []
+    max_rounds = max(len(v) for v in by_panel.values())
+    for round_i in range(max_rounds):
+        for panel_idx in sorted(by_panel):
+            panel_jobs = by_panel[panel_idx]
+            if round_i < len(panel_jobs):
+                ordered.append(panel_jobs[round_i])
+    return ordered
+
+
+def render_moodboard_images_parallel(
+    *,
+    generate_one: Callable[[str], bytes | None],
+    jobs: List[MoodboardImageJob],
+    max_images: int,
+    workers: int,
+) -> Dict[Tuple[int, int], str]:
+    """
+    Run moodboard variant image generation concurrently.
+    Returns map (panel_idx, variant_idx) -> base64 PNG.
+    """
+    if max_images <= 0 or not jobs:
+        return {}
+
+    selected = prioritize_moodboard_image_jobs(jobs)[:max_images]
+    out: Dict[Tuple[int, int], str] = {}
+    pool_workers = max(1, min(workers, len(selected)))
+
+    def _run(job: MoodboardImageJob) -> Tuple[Tuple[int, int], str | None]:
+        panel_idx, variant_idx, prompt = job
+        try:
+            raw = generate_one(prompt)
+            if raw:
+                return (panel_idx, variant_idx), base64.b64encode(raw).decode("utf-8")
+        except Exception:
+            logger.warning(
+                "Moodboard wall image failed for panel %s variant %s",
+                panel_idx,
+                variant_idx,
+                exc_info=True,
+            )
+        return (panel_idx, variant_idx), None
+
+    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
+        futures = [pool.submit(_run, job) for job in selected]
+        for fut in as_completed(futures):
+            key, b64 = fut.result()
+            if b64:
+                out[key] = b64
+    return out

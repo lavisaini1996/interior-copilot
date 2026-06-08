@@ -8,6 +8,7 @@ import {
   postIntake,
   postMoodboardWalls,
   type CatalogMaterial,
+  type MoodboardVariant,
   type MoodboardWallPanel,
 } from "./api";
 import {
@@ -706,6 +707,56 @@ function WallLayout(props: {
   );
 }
 
+type CachedMoodboardVariant = MoodboardVariant & { cacheKey: string };
+
+type CachedMoodboardPanel = Omit<MoodboardWallPanel, "variants"> & {
+  variants: CachedMoodboardVariant[];
+};
+
+function tagMoodboardPanels(panels: MoodboardWallPanel[], batchId: string): CachedMoodboardPanel[] {
+  return panels.map((panel) => ({
+    ...panel,
+    variants: panel.variants.map((variant, index) => ({
+      ...variant,
+      cacheKey: `${batchId}-${panel.zone_id}-${index}`,
+    })),
+  }));
+}
+
+function mergeMoodboardPanels(
+  existing: CachedMoodboardPanel[],
+  incoming: MoodboardWallPanel[],
+  batchId: string,
+): CachedMoodboardPanel[] {
+  const tagged = tagMoodboardPanels(incoming, batchId);
+  const byZone = new Map<string, CachedMoodboardPanel>();
+  for (const panel of existing) {
+    byZone.set(panel.zone_id, { ...panel, variants: [...panel.variants] });
+  }
+  for (const panel of tagged) {
+    const prev = byZone.get(panel.zone_id);
+    if (prev) {
+      byZone.set(panel.zone_id, {
+        ...prev,
+        title: panel.title || prev.title,
+        zone_type: panel.zone_type || prev.zone_type,
+        openings_summary: panel.openings_summary || prev.openings_summary,
+        variants: [...prev.variants, ...panel.variants],
+      });
+    } else {
+      byZone.set(panel.zone_id, panel);
+    }
+  }
+  const order: string[] = [];
+  for (const panel of existing) {
+    if (!order.includes(panel.zone_id)) order.push(panel.zone_id);
+  }
+  for (const panel of tagged) {
+    if (!order.includes(panel.zone_id)) order.push(panel.zone_id);
+  }
+  return order.map((zoneId) => byZone.get(zoneId)!);
+}
+
 function MoodboardTab() {
   const [mbBrief, setMbBrief] = useState<Record<string, unknown>>(makeDefaultBrief());
   const [mbFloorplanRefs, setMbFloorplanRefs] = useState<UploadedRef[]>([]);
@@ -714,8 +765,8 @@ function MoodboardTab() {
   const [mbSyncing, setMbSyncing] = useState(false);
   const [mbBusy, setMbBusy] = useState(false);
   const [mbError, setMbError] = useState<string | null>(null);
-  const [mbPanels, setMbPanels] = useState<MoodboardWallPanel[]>([]);
-  const [mbVariantsPerWall, setMbVariantsPerWall] = useState(3);
+  const [mbPanels, setMbPanels] = useState<CachedMoodboardPanel[]>([]);
+  const [mbVariantsPerWall, setMbVariantsPerWall] = useState(1);
   const [mbGenStatus, setMbGenStatus] = useState("");
 
   const mbRooms = useMemo(() => {
@@ -847,7 +898,6 @@ function MoodboardTab() {
     }
     setMbBusy(true);
     setMbError(null);
-    setMbPanels([]);
     setMbGenStatus("Planning panels per wall…");
     try {
       const style = mbStyleRefs.map((r) => ({ mime_type: r.mime_type, data_base64: r.data_base64 }));
@@ -858,7 +908,8 @@ function MoodboardTab() {
         variants_per_wall: mbVariantsPerWall,
       });
       setMbBrief(resp.updated_brief as Record<string, unknown>);
-      setMbPanels(resp.panels ?? []);
+      const batchId = String(Date.now());
+      setMbPanels((prev) => mergeMoodboardPanels(prev, resp.panels ?? [], batchId));
       setMbGenStatus("");
     } catch (e: any) {
       setMbError(e?.message ?? String(e));
@@ -893,7 +944,15 @@ function MoodboardTab() {
             Add floor plan
           </label>
           {mbFloorplanRefs.length ? (
-            <button className="btn secondary" type="button" onClick={() => setMbFloorplanRefs([])} disabled={mbBusy}>
+            <button
+              className="btn secondary"
+              type="button"
+              onClick={() => {
+                setMbFloorplanRefs([]);
+                setMbPanels([]);
+              }}
+              disabled={mbBusy}
+            >
               Clear plan
             </button>
           ) : null}
@@ -1024,7 +1083,7 @@ function MoodboardTab() {
         <div className="uploadRow" style={{ marginTop: 10 }}>
           <div className="uploadMeta">
             <div className="smallTitle">Variants per wall</div>
-            <div className="muted">3–4 images with different component mixes (sofa vs sectional, etc.)</div>
+            <div className="muted">1–4 images with different component mixes (sofa vs sectional, etc.)</div>
           </div>
           <select
             className="select"
@@ -1032,6 +1091,8 @@ function MoodboardTab() {
             onChange={(e) => setMbVariantsPerWall(Number(e.target.value))}
             disabled={mbBusy}
           >
+            <option value={1}>1</option>
+            <option value={2}>2</option>
             <option value={3}>3</option>
             <option value={4}>4</option>
           </select>
@@ -1045,9 +1106,10 @@ function MoodboardTab() {
           </button>
         </div>
         {mbGenStatus ? <p className="muted" style={{ marginTop: 8 }}>{mbGenStatus}</p> : null}
-        {mbBusy && !mbPanels.length ? (
+        {mbBusy ? (
           <p className="muted" style={{ marginTop: 8 }}>
-            Creating {mbVariantsPerWall} options per wall — this can take several minutes.
+            Creating {mbVariantsPerWall} option{mbVariantsPerWall === 1 ? "" : "s"} per wall
+            {mbPanels.length ? " (previous results stay visible below)" : ""} — this can take several minutes.
           </p>
         ) : null}
         {mbError ? (
@@ -1069,8 +1131,8 @@ function MoodboardTab() {
               </div>
               {panel.openings_summary ? <p className="muted">{panel.openings_summary}</p> : null}
               <div className="images mbVariantGrid">
-                {panel.variants.map((v, vi) => (
-                  <div className="imgWrap" key={`${panel.zone_id}-${vi}`}>
+                {panel.variants.map((v) => (
+                  <div className="imgWrap" key={v.cacheKey}>
                     {v.image_base64_png ? (
                       <img className="img" src={b64ToDataUrlPng(v.image_base64_png)} alt={v.label} />
                     ) : (
@@ -1090,7 +1152,7 @@ function MoodboardTab() {
                       <a
                         className="download"
                         href={b64ToDataUrlPng(v.image_base64_png)}
-                        download={`moodboard_${panel.zone_id}_${vi + 1}.png`}
+                        download={`moodboard_${panel.zone_id}_${v.cacheKey}.png`}
                       >
                         Download PNG
                       </a>

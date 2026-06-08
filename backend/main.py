@@ -28,11 +28,13 @@ from backend.llm import (
     generate_moodboard_prompts,
     plan_moodboard_wall_panels,
 )
+from backend.moodboard_frame import apply_material_board_frame
 from backend.moodboard_walls import (
     enrich_moodboard_image_prompt,
     ensure_floor_panel,
     merge_suggested_assignments,
     merge_suggested_floor_items,
+    render_moodboard_images_parallel,
 )
 from backend.gemini_client import score_render_wall_layout
 from backend.catalog import load_catalog
@@ -1003,6 +1005,7 @@ def moodboard_walls(req: MoodboardWallsRequest) -> MoodboardWallsResponse:
         )
 
         panels_out: List[MoodboardWallPanelOut] = []
+        image_jobs: list[tuple[int, int, str]] = []
         for raw in raw_panels:
             if not isinstance(raw, dict):
                 continue
@@ -1036,24 +1039,15 @@ def moodboard_walls(req: MoodboardWallsRequest) -> MoodboardWallsResponse:
                     zone_type=zone_type,
                     components=components,
                 )
-                img_b64: str | None = None
-                try:
-                    imgs = generate_images(
-                        cfg=cfg,
-                        prompt=prompt,
-                        n=1,
-                        floorplan_images=fp_imgs or None,
-                    )
-                    if imgs:
-                        img_b64 = base64.b64encode(imgs[0]).decode("utf-8")
-                except Exception:
-                    logger.warning("Moodboard wall image failed for %s / %s", zone_id, label, exc_info=True)
+                panel_idx = len(panels_out)
+                variant_idx = len(variants_out)
+                image_jobs.append((panel_idx, variant_idx, prompt))
                 variants_out.append(
                     MoodboardVariantOut(
                         label=label,
                         components=components,
                         prompt=prompt,
-                        image_base64_png=img_b64,
+                        image_base64_png=None,
                     )
                 )
             if variants_out:
@@ -1065,6 +1059,52 @@ def moodboard_walls(req: MoodboardWallsRequest) -> MoodboardWallsResponse:
                         openings_summary=openings_summary,
                         variants=variants_out,
                     )
+                )
+
+        max_images = _env_int("MOODBOARD_WALL_MAX_IMAGES", 12, lo=0, hi=32)
+        image_workers = _env_int("MOODBOARD_WALL_IMAGE_WORKERS", 4, lo=1, hi=8)
+        if image_jobs and max_images > 0:
+
+            def _generate_one(prompt: str) -> bytes | None:
+                imgs = generate_images(
+                    cfg=cfg,
+                    prompt=prompt,
+                    n=1,
+                    floorplan_images=fp_imgs or None,
+                )
+                return imgs[0] if imgs else None
+
+            rendered = render_moodboard_images_parallel(
+                generate_one=_generate_one,
+                jobs=image_jobs,
+                max_images=max_images,
+                workers=image_workers,
+            )
+            room_label = str(
+                merged_brief.get("selected_room_name")
+                or merged_brief.get("space_type")
+                or "Room"
+            ).strip()
+            frame_boards = not _env_flag("MOODBOARD_FRAME_OFF")
+            for (panel_idx, variant_idx), img_b64 in rendered.items():
+                panel = panels_out[panel_idx]
+                variant = panel.variants[variant_idx]
+                if frame_boards:
+                    try:
+                        framed = apply_material_board_frame(
+                            base64.b64decode(img_b64),
+                            room_label=room_label,
+                        )
+                        img_b64 = base64.b64encode(framed).decode("utf-8")
+                    except Exception:
+                        logger.warning(
+                            "Material board frame failed for %s / %s",
+                            panel.zone_id,
+                            variant.label,
+                            exc_info=True,
+                        )
+                panel.variants[variant_idx] = variant.model_copy(
+                    update={"image_base64_png": img_b64}
                 )
 
         if not panels_out:
