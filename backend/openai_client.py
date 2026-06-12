@@ -548,10 +548,11 @@ def plan_moodboard_wall_panels(
     n_var = max(1, min(4, int(variants_per_wall)))
     room = str(brief.get("selected_room_name") or brief.get("space_type") or "room").strip()
     system = (
-        "You plan interior design moodboards like a professional furniture layout deck (one slide per wall/zone). "
-        f"Produce panels per compass wall plus a REQUIRED 'floor' zone for dining/living/bedroom/kitchen with {n_var} variants. "
-        "Dining rooms must include dining table and chairs on the floor. Living needs coffee table and rug. "
-        "Wall shots must be wide enough to show floor furniture in the center, not wall-only elevations. "
+        "You plan interior design moodboards with one image per component (sofa, TV unit, coffee table, etc.). "
+        f"When wall_assignments is empty, up to {n_var} style variants per component type. "
+        "Sofa = single sofa vignette only, not a full room. TV unit = wall elevation only. "
+        "One component per panel; never bundle sofa + TV + table in one image. "
+        "Add floor panels for coffee table, dining table, bed, rug as needed. "
         "Fill suggested_floor_items. Output ONLY valid JSON matching the schema."
     )
     payload = {"brief": brief, "room_name": room, "variants_per_panel": n_var}

@@ -152,6 +152,7 @@ Add domain in Vercel, then add that URL to Cloud Run `CORS_ORIGINS` and redeploy
 | `VITE_API_BASE` still localhost | Rebuild Vercel after setting env var |
 | 503 / network errors | Cloud Run needs outbound internet for Gemini API |
 | Request timeout | Increase Cloud Run `--timeout` (max 3600s); design gen can be slow |
+| `/api/moodboard/walls` 500/504 | Endpoint renders many images; set `--timeout 300`, `MOODBOARD_WALL_IMAGE_WORKERS=4`, `MOODBOARD_WALL_MAX_IMAGES=12` (or redeploy latest API with parallel renders) |
 | 400 on intake | Check Cloud Run logs: `gcloud run services logs read interior-copilot-api --region us-central1` |
 
 ---

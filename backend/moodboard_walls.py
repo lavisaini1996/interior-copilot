@@ -13,6 +13,180 @@ logger = logging.getLogger("interior_copilot.moodboard_walls")
 WALL_ZONE_IDS = ("north", "south", "east", "west")
 EXTRA_ZONE_IDS = ("ceiling", "overview", "floor")
 
+COMPONENT_LABELS: Dict[str, str] = {
+    "sofa": "Sofa",
+    "sectional": "Sectional sofa",
+    "accent_chair": "Accent chair",
+    "ottoman": "Ottoman",
+    "coffee_table": "Coffee table",
+    "side_table": "Side table",
+    "tv_unit": "TV unit",
+    "console": "Console",
+    "bookshelf": "Bookshelf",
+    "sideboard": "Sideboard",
+    "bar_cabinet": "Bar cabinet",
+    "floor_lamp": "Floor lamp",
+    "art": "Art / wall decor",
+    "mirror": "Mirror",
+    "planter": "Planter",
+    "accent_wall": "Accent wall / paneling",
+    "fireplace": "Fireplace",
+    "bed": "Bed",
+    "headboard": "Upholstered headboard",
+    "wardrobe": "Wardrobe",
+    "loft": "Loft storage",
+    "bedside": "Bedside table",
+    "dresser": "Dresser",
+    "chest_of_drawers": "Chest of drawers",
+    "study": "Study desk",
+    "desk": "Desk",
+    "reading_chair": "Reading chair",
+    "bench": "Bench",
+    "wall_sconces": "Wall sconces",
+    "wallpaper": "Wallpaper feature",
+    "dining_table": "Dining table",
+    "dining_chairs": "Dining chairs",
+    "crockery": "Crockery unit",
+    "wine_rack": "Wine rack",
+    "pendant_light": "Pendant light",
+    "rug": "Area rug",
+    "base_cabinets": "Base cabinets",
+    "wall_cabinets": "Wall cabinets",
+    "backsplash": "Backsplash",
+    "vanity": "Vanity",
+    "pooja_unit": "Pooja unit",
+}
+
+FREESTANDING_ITEMS = frozenset(
+    {
+        "sofa",
+        "sectional",
+        "accent_chair",
+        "ottoman",
+        "coffee_table",
+        "side_table",
+        "dining_table",
+        "dining_chairs",
+        "bench",
+        "bed",
+        "bedside",
+        "dresser",
+        "chest_of_drawers",
+        "reading_chair",
+        "desk",
+        "study",
+        "chair",
+        "floor_lamp",
+        "console",
+        "seating",
+        "cafe_table",
+        "rug",
+        "ottoman",
+    }
+)
+
+WALL_BUILTIN_ITEMS = frozenset(
+    {
+        "tv_unit",
+        "wardrobe",
+        "loft",
+        "headboard",
+        "bookshelf",
+        "sideboard",
+        "bar_cabinet",
+        "crockery",
+        "wine_rack",
+        "accent_wall",
+        "wallpaper",
+        "wall_sconces",
+        "art",
+        "mirror",
+        "fireplace",
+        "base_cabinets",
+        "wall_cabinets",
+        "backsplash",
+        "vanity",
+        "pooja_unit",
+        "pendant_light",
+        "wall_paneling",
+        "jali",
+        "lighting",
+    }
+)
+
+ROOM_FLOOR_COMPONENT_IDS: Dict[str, List[str]] = {
+    "dining": ["dining_table", "dining_chairs", "rug"],
+    "living": ["coffee_table", "rug", "side_table"],
+    "bedroom": ["bed", "bedside", "rug"],
+    "kitchen": ["counter", "peninsula"],
+    "study": ["desk", "chair", "rug"],
+    "default": ["rug"],
+}
+
+COMPONENT_ALIASES: Dict[str, str] = {
+    "sectional_sofa": "sectional",
+    "tv": "tv_unit",
+    "tv_unit": "tv_unit",
+    "coffee_table": "coffee_table",
+    "area_rug": "rug",
+    "side_table": "side_table",
+    "dining_chair": "dining_chairs",
+    "accent_wall_paneling": "accent_wall",
+}
+
+VARIANT_LABELS = ("Option A", "Option B", "Option C", "Option D")
+
+COMPONENT_VARIANT_HINTS: Dict[str, List[str]] = {
+    "sofa": [
+        "classic three-seater with tailored upholstery and slim wooden legs",
+        "channel-tufted velvet with brass-capped feet and structured arms",
+        "low-profile contemporary silhouette with linen fabric",
+        "curved organic form with rich jewel-tone upholstery",
+    ],
+    "sectional": [
+        "L-shaped sectional with chaise on the left",
+        "U-shaped modular sectional with deep seats",
+        "compact two-piece sectional for smaller rooms",
+        "sectional with integrated storage ottoman module",
+    ],
+    "tv_unit": [
+        "white marble slab center with fluted cream panels and brass vertical sconces",
+        "dark green wainscot panels with tambour slats and warm LED strip accents",
+        "minimal light-oak slat wall with floating black console shelf",
+        "textured stone feature panel with integrated ambient cove lighting",
+    ],
+    "coffee_table": [
+        "round white marble top with brushed brass base",
+        "rectangular smoked-glass top with black metal frame",
+        "nested set of two round wood tables",
+        "sculptural stone pedestal coffee table",
+    ],
+    "rug": [
+        "bold geometric pattern in gold and charcoal",
+        "subtle neutral hand-knotted wool rug",
+        "Moroccan-inspired trellis pattern",
+        "solid plush rug in a deep accent color",
+    ],
+    "bed": [
+        "upholstered platform bed with tall headboard",
+        "low platform bed with wood frame and linen bedding",
+        "wingback upholstered bed with nailhead trim",
+        "minimal Japanese-inspired low bed with natural wood",
+    ],
+    "dining_table": [
+        "rectangular solid-wood table for six to eight seats",
+        "round marble-top dining table with pedestal base",
+        "extendable dining table with tapered legs",
+        "live-edge wood slab dining table with metal legs",
+    ],
+    "wardrobe": [
+        "floor-to-ceiling flush sliding doors in matte lacquer",
+        "fluted wood sliding wardrobe with bronze pulls",
+        "glass-front wardrobe sections with internal lighting",
+        "two-tone wardrobe with open display niche",
+    ],
+}
+
 # Minimum floor-plane furniture per room type (professional layout standards).
 ROOM_FLOOR_STANDARDS: Dict[str, List[str]] = {
     "dining": [
@@ -103,6 +277,341 @@ def floor_items_for_brief(brief: Dict[str, Any]) -> List[str]:
     return list(ROOM_FLOOR_STANDARDS.get(kind, ROOM_FLOOR_STANDARDS["default"]))
 
 
+def normalize_component_id(raw: str) -> str:
+    s = re.sub(r"[^a-z0-9_]+", "_", str(raw or "").strip().lower()).strip("_")
+    return COMPONENT_ALIASES.get(s, s)
+
+
+def component_display_label(component_id: str) -> str:
+    cid = normalize_component_id(component_id)
+    if cid in COMPONENT_LABELS:
+        return COMPONENT_LABELS[cid]
+    return cid.replace("_", " ").title()
+
+
+def component_shot_type(component_id: str) -> str:
+    cid = normalize_component_id(component_id)
+    if cid in FREESTANDING_ITEMS:
+        return "freestanding"
+    if cid in WALL_BUILTIN_ITEMS:
+        return "wall_builtin"
+    return "freestanding" if cid in {"planter", "swing"} else "wall_builtin"
+
+
+def _openings_for_wall(brief: Dict[str, Any], wall: str) -> str:
+    openings = normalize_wall_openings(brief.get("wall_openings"))
+    ops = openings.get(wall) or []
+    return ", ".join(ops) if ops else ""
+
+
+def _brief_materials_txt(brief: Dict[str, Any]) -> str:
+    mats = brief.get("material_preferences")
+    if isinstance(mats, list) and mats:
+        return ", ".join(str(m).strip() for m in mats if str(m).strip())[:120]
+    return ""
+
+
+def _wall_backdrop_labels(brief: Dict[str, Any], wall: str, exclude_cid: str) -> List[str]:
+    """Other items on the same wall that may appear in the zone background."""
+    assignments = normalize_wall_assignments(brief.get("wall_assignments"))
+    labels: List[str] = []
+    exclude = normalize_component_id(exclude_cid)
+    for item in assignments.get(wall) or []:
+        iid = normalize_component_id(item)
+        if iid and iid != exclude and component_display_label(iid) not in labels:
+            labels.append(component_display_label(iid))
+    return labels
+
+
+def zone_background_block(brief: Dict[str, Any], wall: str, component_id: str) -> str:
+    """Describe the styled zone backdrop that must appear with the hero component."""
+    cid = normalize_component_id(component_id)
+    label = component_display_label(cid)
+    room = str(brief.get("selected_room_name") or brief.get("space_type") or "room").strip()
+    style = str(brief.get("style_direction") or "").strip()
+    materials = _brief_materials_txt(brief)
+    colors = brief.get("color_preferences")
+    color_txt = ""
+    if isinstance(colors, list) and colors:
+        color_txt = ", ".join(str(c).strip() for c in colors if str(c).strip())[:80]
+
+    lines = [
+        f"ZONE BACKGROUND — render the {label} inside its designed interior setting (not a plain studio backdrop):",
+    ]
+
+    if wall in WALL_ZONE_IDS:
+        openings = _openings_for_wall(brief, wall)
+        backdrops = _wall_backdrop_labels(brief, wall, cid)
+        lines.append(
+            f"  • {wall.title()} wall behind the hero: full wall finish — paneling, moulding, paint, wallpaper, "
+            "stone, or feature treatment matching the style brief."
+        )
+        if backdrops:
+            lines.append(
+                f"  • Same-wall context (supporting elements, not separate heroes): {', '.join(backdrops)}."
+            )
+        if openings:
+            lines.append(f"  • Openings on this wall: {openings}.")
+        lines.append(
+            "  • Visible floor finish in the lower third (marble, herringbone wood, tile, or rug edge at base)."
+        )
+        lines.append("  • Ceiling edge, cove, or architectural lighting at the top of frame when appropriate.")
+    else:
+        lines.append(
+            f"  • {room} floor zone: show the room floor finish, baseboard, and soft wall glimpses at frame edges."
+        )
+        lines.append("  • Natural or architectural lighting consistent with the room style.")
+
+    if materials:
+        lines.append(f"  • Materials palette: {materials}.")
+    if color_txt:
+        lines.append(f"  • Color palette: {color_txt}.")
+    if style:
+        lines.append(f"  • Style direction: {style}.")
+
+    lines.append(
+        "The background must read as a real designed interior zone — not a grey sweep, white void, or catalog cutout."
+    )
+    lines.append(
+        f"Hero = {label} only. Do NOT add furniture from other walls/zones or a full-room wide shot."
+    )
+    return "\n".join(lines)
+
+
+def _floor_component_ids(brief: Dict[str, Any]) -> List[str]:
+    custom = brief.get("moodboard_floor_items")
+    if isinstance(custom, list) and custom:
+        ids: List[str] = []
+        for raw in custom:
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            cid = normalize_component_id(raw)
+            if cid and cid not in ids:
+                ids.append(cid)
+        if ids:
+            return ids
+    kind = infer_room_kind(brief)
+    return list(ROOM_FLOOR_COMPONENT_IDS.get(kind, ROOM_FLOOR_COMPONENT_IDS["default"]))
+
+
+def _generic_variant_hints(component_id: str, n: int) -> List[str]:
+    label = component_display_label(component_id)
+    base = [
+        f"{label} — refined classic proportions and neutral palette",
+        f"{label} — richer material mix with warm metal accents",
+        f"{label} — contemporary minimal form with contrast textures",
+        f"{label} — bold statement finish aligned with the style brief",
+    ]
+    return base[: max(1, n)]
+
+
+def variant_hints_for_component(component_id: str, n: int) -> List[str]:
+    cid = normalize_component_id(component_id)
+    n = max(1, min(4, n))
+    hints = COMPONENT_VARIANT_HINTS.get(cid) or _generic_variant_hints(cid, n)
+    if len(hints) >= n:
+        return hints[:n]
+    out = list(hints)
+    while len(out) < n:
+        out.append(hints[-1])
+    return out
+
+
+def build_component_image_prompt(
+    component_id: str,
+    *,
+    wall: str,
+    brief: Dict[str, Any],
+    variant_hint: str | None = None,
+) -> str:
+    """Deterministic base prompt for a single component image."""
+    cid = normalize_component_id(component_id)
+    label = component_display_label(cid)
+    room = str(brief.get("selected_room_name") or brief.get("space_type") or "room").strip()
+    style = str(brief.get("style_direction") or "").strip()
+    shot = component_shot_type(cid)
+    wall_txt = wall.title() if wall in WALL_ZONE_IDS else "center floor"
+    variant_txt = (variant_hint or "").strip()
+
+    bg = zone_background_block(brief, wall, cid)
+
+    if shot == "freestanding":
+        body = (
+            f"Photorealistic interior moodboard: {room} — {label} as hero on the {wall_txt}, "
+            f"shown WITH its styled zone background (wall treatment, floor finish, lighting).\n"
+            f"{bg}\n"
+            f"Three-quarter view: ONE {label} in front of the finished wall/floor setting. "
+            f"No extra furniture from other zones, no full-room panorama."
+        )
+    else:
+        body = (
+            f"Photorealistic interior moodboard: {room} — {label} on {wall_txt} "
+            f"with full wall-and-floor background context.\n"
+            f"{bg}\n"
+            f"Component-focused elevation: {label} integrated into the finished wall "
+            f"(materials, joinery, lighting). No sofas, beds, or center-floor furniture from other zones."
+        )
+    if variant_txt:
+        body += f" This option: {variant_txt}."
+    return body
+
+
+def build_component_variants(
+    component_id: str,
+    *,
+    wall: str,
+    brief: Dict[str, Any],
+    n: int,
+) -> List[Dict[str, Any]]:
+    """Build n visually distinct style alternatives for the same component."""
+    cid = normalize_component_id(component_id)
+    count = max(1, min(4, int(n)))
+    hints = variant_hints_for_component(cid, count)
+    variants: List[Dict[str, Any]] = []
+    for i in range(count):
+        label = VARIANT_LABELS[i] if i < len(VARIANT_LABELS) else f"Option {i + 1}"
+        variants.append(
+            {
+                "label": label,
+                "components": [cid],
+                "image_prompt": build_component_image_prompt(
+                    cid,
+                    wall=wall,
+                    brief=brief,
+                    variant_hint=hints[i],
+                ),
+            }
+        )
+    return variants
+
+
+def _component_panel(
+    component_id: str,
+    *,
+    wall: str,
+    brief: Dict[str, Any],
+    variants_per_component: int,
+    title: str,
+    openings_summary: str = "",
+) -> Dict[str, Any]:
+    return {
+        "zone_id": wall,
+        "zone_type": "component",
+        "title": title,
+        "openings_summary": openings_summary,
+        "variants": build_component_variants(
+            component_id,
+            wall=wall,
+            brief=brief,
+            n=variants_per_component,
+        ),
+    }
+
+
+def expand_panels_per_component(
+    panels: List[Dict[str, Any]],
+    *,
+    brief: Dict[str, Any],
+    variants_per_component: int = 3,
+) -> List[Dict[str, Any]]:
+    """One panel per component with multiple style variants each."""
+    assignments = normalize_wall_assignments(brief.get("wall_assignments"))
+    seen: set[tuple[str, str]] = set()
+    out: List[Dict[str, Any]] = []
+
+    for wall in WALL_ZONE_IDS:
+        for comp in assignments[wall]:
+            cid = normalize_component_id(comp)
+            if not cid:
+                continue
+            key = (wall, cid)
+            if key in seen:
+                continue
+            seen.add(key)
+            label = component_display_label(cid)
+            out.append(
+                _component_panel(
+                    cid,
+                    wall=wall,
+                    brief=brief,
+                    variants_per_component=variants_per_component,
+                    title=f"{label} — {wall.title()} wall",
+                    openings_summary=_openings_for_wall(brief, wall),
+                )
+            )
+
+    for cid in _floor_component_ids(brief):
+        key = ("floor", cid)
+        if key in seen or any(normalize_component_id(c) == cid for w in WALL_ZONE_IDS for c in assignments[w]):
+            continue
+        seen.add(key)
+        label = component_display_label(cid)
+        out.append(
+            _component_panel(
+                cid,
+                wall="floor",
+                brief=brief,
+                variants_per_component=variants_per_component,
+                title=f"{label} — floor",
+                openings_summary="Center-floor component",
+            )
+        )
+
+    if out:
+        return out
+
+    split: List[Dict[str, Any]] = []
+    for panel in panels:
+        if not isinstance(panel, dict):
+            continue
+        zone_id = str(panel.get("zone_id") or "").strip().lower() or "wall"
+        zone_type = str(panel.get("zone_type") or "wall").strip()
+        title_base = str(panel.get("title") or zone_id).strip()
+        openings_summary = str(panel.get("openings_summary") or "").strip()
+        raw_vars = panel.get("variants")
+        if not isinstance(raw_vars, list):
+            continue
+        for rv in raw_vars:
+            if not isinstance(rv, dict):
+                continue
+            comps_raw = rv.get("components")
+            comps = (
+                [normalize_component_id(c) for c in comps_raw if isinstance(c, str) and str(c).strip()]
+                if isinstance(comps_raw, list)
+                else []
+            )
+            if not comps:
+                guess = normalize_component_id(str(rv.get("label") or ""))
+                comps = [guess] if guess else []
+            prompt_base = str(rv.get("image_prompt") or "").strip()
+            for cid in comps:
+                if not cid:
+                    continue
+                key = (zone_id, cid)
+                if key in seen:
+                    continue
+                seen.add(key)
+                label = component_display_label(cid)
+                variants = build_component_variants(
+                    cid,
+                    wall=zone_id,
+                    brief=brief,
+                    n=variants_per_component,
+                )
+                if prompt_base and variants:
+                    variants[0]["image_prompt"] = prompt_base
+                split.append(
+                    {
+                        "zone_id": zone_id,
+                        "zone_type": "component",
+                        "title": f"{label} — {title_base}",
+                        "openings_summary": openings_summary,
+                        "variants": variants,
+                    }
+                )
+    return split or panels
+
+
 def floor_items_block(brief: Dict[str, Any]) -> str:
     items = floor_items_for_brief(brief)
     room = str(brief.get("selected_room_name") or brief.get("space_type") or "room").strip()
@@ -125,30 +634,48 @@ def enrich_moodboard_image_prompt(
     zone_type: str,
     components: List[str],
 ) -> str:
-    """Append floor-furniture rules so wall shots still show dining table, rug, etc."""
+    """Append shot-type rules: one component per image (freestanding vignette or wall elevation)."""
     floor_block = floor_items_block(brief)
     style = str(brief.get("style_direction") or "").strip()
     notes = str(brief.get("notes") or "").strip()
-    comp_txt = ", ".join(components) if components else "as listed"
+    primary = normalize_component_id(components[0]) if components else ""
+    label = component_display_label(primary) if primary else "component"
+    shot = component_shot_type(primary) if primary else "wall_builtin"
 
-    if zone_id == "floor" or zone_type == "floor":
-        extra = (
-            f"{floor_block}\n\n"
-            "SHOT: Wide angle or three-quarter view showing the FULL floor layout; "
-            f"hero focus on center-floor furniture ({comp_txt}). Walls visible at edges. "
-            "Photorealistic interior moodboard panel."
-        )
-    elif zone_id == "overview" or zone_type == "overview":
+    if zone_type == "overview" or zone_id == "overview":
         extra = (
             f"{floor_block}\n\n"
             "SHOT: Full room vignette — all walls partially visible AND every mandatory floor item clearly shown."
         )
-    else:
+    elif shot == "freestanding" or (zone_id == "floor" and zone_type == "component"):
+        bg = zone_background_block(brief, zone_id, primary)
         extra = (
-            f"{floor_block}\n\n"
-            f"SHOT: This panel highlights the {zone_id.upper()} wall ({comp_txt}) but the camera must be "
-            "wide enough that mandatory floor furniture remains visible in the foreground/center of the room. "
-            "Never crop out the dining table / bed / coffee table if required for this room type."
+            f"SHOT TYPE: Hero component with zone background — {label} in its designed setting.\n"
+            f"CAMERA: Three-quarter or front view; medium crop on the {label} and its wall/floor context.\n"
+            f"{bg}\n"
+            "COMPOSITION: Hero = this one furniture piece. Include the styled wall behind, floor finish below, "
+            "and lighting above — like a professional interior component board slide.\n"
+            "STRICT: Do not add other hero furniture (no extra sofas, tables, TVs, beds). "
+            "Background decor on the same wall is allowed.\n"
+            "Never use a plain neutral studio backdrop."
+        )
+    elif zone_id == "floor" or zone_type == "floor":
+        bg = zone_background_block(brief, zone_id, primary)
+        extra = (
+            f"SHOT TYPE: Floor component with room-zone background — {label}.\n"
+            f"{bg}\n"
+            "Show the floor finish and partial wall context; no other hero furniture pieces."
+        )
+    else:
+        bg = zone_background_block(brief, zone_id, primary)
+        extra = (
+            f"SHOT TYPE: Wall component with full zone background — {label} on "
+            f"{zone_id.upper()} wall.\n"
+            "CAMERA: Straight-on or slight three-quarter elevation on this wall segment.\n"
+            f"{bg}\n"
+            "COMPOSITION: Built-in/wall-mounted hero integrated into finished wall materials, joinery, "
+            "and lighting. Floor finish visible below. No furniture from other zones.\n"
+            "Reference style: TV-wall / feature-wall moodboard with rich background, photorealistic."
         )
 
     if style:

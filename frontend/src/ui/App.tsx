@@ -1062,8 +1062,8 @@ function MoodboardTab() {
           disabled={mbBusy}
         />
         <p className="muted" style={{ marginTop: 6, fontSize: 12 }}>
-          Wall panels stay accurate; we also generate a <strong>floor layout</strong> section (table, bed, coffee
-          table, etc.) so center items are not missing.
+          Generates <strong>multiple style options per component</strong> with its wall/floor background (paneling,
+          floor finish, lighting) — one hero item per image, not a full furnished room.
         </p>
         <div className="uploadRow" style={{ marginTop: 10 }}>
           <label className="fileBtn">
@@ -1083,7 +1083,7 @@ function MoodboardTab() {
         <div className="uploadRow" style={{ marginTop: 10 }}>
           <div className="uploadMeta">
             <div className="smallTitle">Variants per wall</div>
-            <div className="muted">1–4 images with different component mixes (sofa vs sectional, etc.)</div>
+            <div className="muted">1–4 style options per component (Option A, B, C…)</div>
           </div>
           <select
             className="select"

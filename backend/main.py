@@ -32,6 +32,7 @@ from backend.moodboard_frame import apply_material_board_frame
 from backend.moodboard_walls import (
     enrich_moodboard_image_prompt,
     ensure_floor_panel,
+    expand_panels_per_component,
     merge_suggested_assignments,
     merge_suggested_floor_items,
     render_moodboard_images_parallel,
@@ -1003,6 +1004,11 @@ def moodboard_walls(req: MoodboardWallsRequest) -> MoodboardWallsResponse:
         raw_panels = ensure_floor_panel(
             raw_panels, brief=merged_brief, variants_per_wall=req.variants_per_wall
         )
+        raw_panels = expand_panels_per_component(
+            raw_panels,
+            brief=merged_brief,
+            variants_per_component=req.variants_per_wall,
+        )
 
         panels_out: List[MoodboardWallPanelOut] = []
         image_jobs: list[tuple[int, int, str]] = []
@@ -1061,7 +1067,9 @@ def moodboard_walls(req: MoodboardWallsRequest) -> MoodboardWallsResponse:
                     )
                 )
 
-        max_images = _env_int("MOODBOARD_WALL_MAX_IMAGES", 12, lo=0, hi=32)
+        max_images = _env_int("MOODBOARD_WALL_MAX_IMAGES", 24, lo=0, hi=32)
+        if image_jobs:
+            max_images = min(32, max(max_images, len(image_jobs)))
         image_workers = _env_int("MOODBOARD_WALL_IMAGE_WORKERS", 4, lo=1, hi=8)
         if image_jobs and max_images > 0:
 
