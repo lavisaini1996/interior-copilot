@@ -1,9 +1,10 @@
+import { parseApiErrorResponse } from "./errors";
+
 export type ChatMessage = { role: "user" | "assistant"; content: string };
 
 export type ImagePayload = { mime_type: string; data_base64: string };
 
-export type IntakeResponse = {
-  is_complete: boolean;
+export type IntakeResponse = {  is_complete: boolean;
   updated_brief: Record<string, unknown>;
   questions: string[];
 };
@@ -103,15 +104,17 @@ export function activeApiTarget(): ApiTarget {
 
 const API_BASE = resolveApiBase();
 
-export async function fetchCatalogMaterials(): Promise<CatalogMaterial[]> {
-  const res = await fetch(`${API_BASE}/api/catalog/materials`);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `HTTP ${res.status}`);
-  }
-  return (await res.json()) as CatalogMaterial[];
+async function assertOk(res: Response): Promise<void> {
+  if (res.ok) return;
+  const text = await res.text();
+  throw parseApiErrorResponse(res.status, text);
 }
 
+export async function fetchCatalogMaterials(): Promise<CatalogMaterial[]> {
+  const res = await fetch(`${API_BASE}/api/catalog/materials`);
+  await assertOk(res);
+  return (await res.json()) as CatalogMaterial[];
+}
 export async function postIntake(params: {
   brief: Record<string, unknown>;
   chat_history: ChatMessage[];
@@ -131,10 +134,7 @@ export async function postIntake(params: {
       max_questions: params.max_questions ?? 3,
     }),
   });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `HTTP ${res.status}`);
-  }
+  await assertOk(res);
   return (await res.json()) as IntakeResponse;
 }
 
@@ -152,10 +152,7 @@ export async function postMoodboard(params: {
       num_images: params.num_images ?? 3,
     }),
   });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `HTTP ${res.status}`);
-  }
+  await assertOk(res);
   return (await res.json()) as MoodboardResponse;
 }
 
@@ -175,10 +172,7 @@ export async function postMoodboardWalls(params: {
       variants_per_wall: params.variants_per_wall ?? 3,
     }),
   });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `HTTP ${res.status}`);
-  }
+  await assertOk(res);
   return (await res.json()) as MoodboardWallsResponse;
 }
 
@@ -202,10 +196,7 @@ export async function postDesigns(params: {
       num_designs: params.num_designs ?? 3,
     }),
   });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `HTTP ${res.status}`);
-  }
+  await assertOk(res);
   return (await res.json()) as DesignsResponse;
 }
 

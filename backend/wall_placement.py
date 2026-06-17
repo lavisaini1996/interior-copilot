@@ -802,6 +802,93 @@ def _opening_position_instruction(op: str) -> str:
     return "Render at the exact position shown on the floor plan."
 
 
+def build_hero_wall_backdrop_block(wall: str, component_id: str, brief: Dict[str, Any]) -> str:
+    """
+    Backdrop wall instructions for a component shot: which doors/windows appear
+    on the wall behind the hero, and which must NOT appear (other compass walls).
+    """
+    wall_key = str(wall or "").strip().lower()
+    cid = _norm_item_key(component_id)
+    label = _item_label(cid) if cid else "component"
+    if wall_key not in WALL_IDS:
+        return ""
+
+    openings_raw = brief.get("wall_openings") or {}
+    if not isinstance(openings_raw, dict):
+        openings_raw = {}
+
+    hero_ops = [
+        str(x).strip()
+        for x in (openings_raw.get(wall_key) or [])
+        if isinstance(x, str) and str(x).strip()
+    ]
+
+    lines: List[str] = [
+        f"=== HERO WALL BACKDROP ({wall_key.upper()} wall — from floor plan) ===",
+        f"The surface BEHIND the {label} is the {wall_key.upper()} wall. "
+        "Read the attached floor plan: reproduce this wall's finish AND its openings exactly.",
+        "BACKDROP OPENINGS — show ONLY on this wall surface:",
+    ]
+
+    if hero_ops:
+        for op in hero_ops:
+            low = op.lower()
+            pos = _opening_position_instruction(op)
+            lines.append(f"  • {op} — {pos}")
+            if "door" in low:
+                lines.append(
+                    f"    Draw this door on the {wall_key.upper()} backdrop at the plan position; "
+                    f"do not convert it to a window."
+                )
+            elif "window" in low or "glazing" in low or "slider" in low:
+                lines.append(
+                    f"    Draw this glazing on the {wall_key.upper()} backdrop at the plan position; "
+                    f"do not convert it to a door."
+                )
+    else:
+        lines.append(
+            f"  • NONE — the floor plan shows no doors or windows on {wall_key.upper()}. "
+            f"Render a solid {wall_key.upper()} wall (paneling/paint only). Do NOT add any opening."
+        )
+
+    forbidden: List[str] = []
+    for wid, wname in [("north", "NORTH"), ("south", "SOUTH"), ("east", "EAST"), ("west", "WEST")]:
+        if wid == wall_key:
+            continue
+        ops = [
+            str(x).strip()
+            for x in (openings_raw.get(wid) or [])
+            if isinstance(x, str) and str(x).strip()
+        ]
+        if ops:
+            forbidden.append(f"{wname}: {'; '.join(ops)}")
+
+    if forbidden:
+        lines.append(
+            "FORBIDDEN on this backdrop (these belong to OTHER walls — never draw them on "
+            f"{wall_key.upper()} in this image):"
+        )
+        for entry in forbidden:
+            lines.append(f"  • {entry}")
+
+    lines.append(
+        f"Place the {label} on {wall_key.upper()} respecting openings: do not cover a window/door "
+        "unless the floor plan shows furniture in front of it; leave realistic clearance."
+    )
+    if cid in ("sofa", "sectional", "bed", "headboard"):
+        lines.append(
+            "Freestanding hero: back or side faces the wall; openings remain visible above or beside "
+            "the furniture as on the plan."
+        )
+    elif cid in ("tv_unit", "wardrobe", "vanity", "bookshelf", "sideboard"):
+        lines.append(
+            "Built-in / wall-mounted hero: integrate below or beside openings — TV/console under window, "
+            "wardrobe flanking door, etc., matching the plan layout."
+        )
+
+    return "\n".join(lines)
+
+
 def build_openings_detailed_block(brief: Dict[str, Any]) -> str:
     """Per-opening position rules — reduces wrong window placement (e.g. off-center on north wall)."""
     if not _has_wall_layout_data(brief):
@@ -961,6 +1048,131 @@ def build_layout_director_block(brief: Dict[str, Any]) -> str:
             if ops:
                 chunk += ("; " if items else "") + "openings " + "; ".join(ops)
             lines.append(chunk)
+    return "\n".join(lines)
+
+
+_COMPONENT_WALL_CAMERA: Dict[str, str] = {
+    "north": (
+        "Shot camera: stand on the south side of the room, face the NORTH (far/back) wall head-on (~28mm, eye height 1.5 m). "
+        "The NORTH wall is the backdrop; hero item flush against it. "
+        "Show NORTH wall doors/windows only at floor-plan positions. "
+        "Do NOT place the hero on south/east/west walls."
+    ),
+    "south": (
+        "Shot camera: stand on the north side of the room, face the SOUTH (near/entrance) wall head-on (~28mm, eye height 1.5 m). "
+        "The SOUTH wall is the backdrop; freestanding hero backed against it. "
+        "Show SOUTH wall doors/windows only at floor-plan positions. "
+        "Do NOT place the hero on north/east/west walls."
+    ),
+    "east": (
+        "Shot camera: stand on the west side, face the EAST (right) wall head-on (~28mm, eye height 1.5 m). "
+        "The EAST wall is the backdrop; hero mounted or placed on it. "
+        "Show EAST wall openings at floor-plan positions only."
+    ),
+    "west": (
+        "Shot camera: stand on the east side, face the WEST (left) wall head-on (~28mm, eye height 1.5 m). "
+        "The WEST wall is the backdrop; hero mounted or placed on it. "
+        "Show WEST wall openings at floor-plan positions only."
+    ),
+    "ceiling": (
+        "Shot camera: angled up from room center; ceiling/false-ceiling hero. "
+        "Walls at bottom of frame must match floor plan proportions and opening layout."
+    ),
+    "floor": (
+        "Shot camera: corner perspective into room center (~24mm); hero on the floor plane. "
+        "Room length×width must match the floor plan. "
+        "Each compass wall keeps its assigned furniture at the edges — do not move wall items to other walls."
+    ),
+}
+
+
+def _norm_item_key(raw: str) -> str:
+    return re.sub(r"[^a-z0-9_]+", "_", str(raw or "").strip().lower()).strip("_")
+
+
+def build_component_wall_shot_block(
+    wall: str,
+    component_id: str,
+    brief: Dict[str, Any],
+) -> str:
+    """
+    Placement + camera rules for a single-component moodboard image.
+    Binds the hero to its compass wall / floor zone per the floor plan.
+    """
+    wall_key = str(wall or "").strip().lower()
+    cid = _norm_item_key(component_id)
+    label = _item_label(cid) if cid else "component"
+
+    lines: List[str] = [
+        "=== COMPONENT PLACEMENT (floor plan wall structure — binding) ===",
+        "The attached floor plan image is authoritative for room shape, wall count, proportions, "
+        "and door/window positions. Match it exactly.",
+    ]
+
+    if not _has_wall_layout_data(brief):
+        lines.append(
+            f"Place the {label} where it belongs in the room per the floor plan drawing. "
+            "Do not invent extra walls or openings."
+        )
+        return "\n".join(lines)
+
+    assignments = brief.get("wall_assignments") or {}
+    openings = brief.get("wall_openings") or {}
+    if not isinstance(assignments, dict):
+        assignments = {}
+    if not isinstance(openings, dict):
+        openings = {}
+
+    if wall_key in WALL_IDS:
+        wall_items = [
+            _norm_item_key(x) for x in (assignments.get(wall_key) or []) if isinstance(x, str) and str(x).strip()
+        ]
+        if cid and cid not in wall_items:
+            lines.append(
+                f"WARNING: {label} should be on {wall_key.upper()} wall per this render request — "
+                "keep it on that wall only."
+            )
+        else:
+            lines.append(
+                f"Hero: {label} — assigned to {wall_key.upper()} wall (user floor plan layout). "
+                "Must stay on this wall, not rotated to another wall."
+            )
+
+        camera = _COMPONENT_WALL_CAMERA.get(wall_key, "")
+        if camera:
+            lines.append(camera)
+
+        ops = [str(x).strip() for x in (openings.get(wall_key) or []) if isinstance(x, str) and str(x).strip()]
+        if ops:
+            lines.append(f"{wall_key.upper()} wall openings (show on this backdrop wall): {'; '.join(ops)}.")
+        else:
+            lines.append(f"{wall_key.upper()} wall: no doors/windows — do not draw openings on this wall.")
+
+        other_walls: List[str] = []
+        for wid, wname in [("north", "NORTH"), ("south", "SOUTH"), ("east", "EAST"), ("west", "WEST")]:
+            if wid == wall_key:
+                continue
+            items = [_item_label(str(x)) for x in (assignments.get(wid) or []) if isinstance(x, str) and str(x).strip()]
+            if items:
+                other_walls.append(f"{wname}: {', '.join(items)} (not in this shot — do not show as hero)")
+        if other_walls:
+            lines.append("Other walls (context only — do not move their items into this shot): " + " | ".join(other_walls))
+
+    elif wall_key == "floor":
+        lines.append(_COMPONENT_WALL_CAMERA["floor"])
+        lines.append(f"Hero floor item: {label}.")
+        for wid, wname in [("north", "NORTH"), ("south", "SOUTH"), ("east", "EAST"), ("west", "WEST")]:
+            items = [_item_label(str(x)) for x in (assignments.get(wid) or []) if isinstance(x, str) and str(x).strip()]
+            if items:
+                lines.append(f"  {wname} wall (at frame edge): {', '.join(items)}.")
+    else:
+        lines.append(f"Hero: {label}. Respect all compass wall assignments from the floor plan.")
+
+    lines.append(
+        "Do not mirror, rotate, or flip the room vs the floor plan. "
+        "Do not add or remove walls, doors, or windows. "
+        f"The {label} must match its assigned wall/zone from the plan."
+    )
     return "\n".join(lines)
 
 

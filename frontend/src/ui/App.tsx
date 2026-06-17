@@ -20,6 +20,8 @@ import {
 import { SpeechInput } from "./SpeechInput";
 import { intakeAssistantTail } from "./intakeMessages";
 import { computeWorkflow, WorkflowSection, WorkflowStepper } from "./workflow";
+import { ErrorPopup } from "./ErrorPopup";
+import { toUiError, type UiError } from "./errors";
 
 type WallId = "north" | "south" | "east" | "west";
 type WallAssignments = Record<WallId, string[]>;
@@ -757,14 +759,13 @@ function mergeMoodboardPanels(
   return order.map((zoneId) => byZone.get(zoneId)!);
 }
 
-function MoodboardTab() {
+function MoodboardTab({ showError }: { showError: (e: unknown) => void }) {
   const [mbBrief, setMbBrief] = useState<Record<string, unknown>>(makeDefaultBrief());
   const [mbFloorplanRefs, setMbFloorplanRefs] = useState<UploadedRef[]>([]);
   const [mbStyleRefs, setMbStyleRefs] = useState<UploadedRef[]>([]);
   const [mbProcessing, setMbProcessing] = useState(false);
   const [mbSyncing, setMbSyncing] = useState(false);
   const [mbBusy, setMbBusy] = useState(false);
-  const [mbError, setMbError] = useState<string | null>(null);
   const [mbPanels, setMbPanels] = useState<CachedMoodboardPanel[]>([]);
   const [mbVariantsPerWall, setMbVariantsPerWall] = useState(1);
   const [mbGenStatus, setMbGenStatus] = useState("");
@@ -819,7 +820,6 @@ function MoodboardTab() {
     if (!mbFloorplanRefs.length) return;
     setMbSyncing(true);
     setMbBusy(true);
-    setMbError(null);
     try {
       const fp = mbFloorplanRefs.map((r) => ({ mime_type: r.mime_type, data_base64: r.data_base64 }));
       const style = mbStyleRefs.map((r) => ({ mime_type: r.mime_type, data_base64: r.data_base64 }));
@@ -831,8 +831,8 @@ function MoodboardTab() {
         max_questions: 0,
       });
       setMbBrief(resp.updated_brief as Record<string, unknown>);
-    } catch (e: any) {
-      setMbError(e?.message ?? String(e));
+    } catch (e: unknown) {
+      showError(e);
     } finally {
       setMbSyncing(false);
       setMbBusy(false);
@@ -840,7 +840,6 @@ function MoodboardTab() {
   }
 
   async function onPickMbFloorplan(files: FileList | null) {
-    setMbError(null);
     const converted = await mbToUploadedRefs(files, 1);
     if (!converted.length) return;
     setMbFloorplanRefs(converted);
@@ -864,9 +863,30 @@ function MoodboardTab() {
         floorplan_images: fp,
         max_questions: 0,
       });
-      setMbBrief(resp.updated_brief as Record<string, unknown>);
-    } catch (e: any) {
-      setMbError(e?.message ?? String(e));
+      const rooms = (resp.updated_brief as any)?.rooms_detected;
+      if (Array.isArray(rooms) && rooms.length === 1 && rooms[0]?.id) {
+        const room = rooms[0] as { id?: string; name?: string; length_m?: number; width_m?: number };
+        const { lengthM, widthM } = normalizeDimsToMetres(
+          room.length_m != null ? Number(room.length_m) : null,
+          room.width_m != null ? Number(room.width_m) : null,
+        );
+        const withRoom: Record<string, unknown> = {
+          ...(resp.updated_brief as Record<string, unknown>),
+          selected_room_id: room.id ?? null,
+          selected_room_name: room.name ?? null,
+          space_type: room.name ?? null,
+          room_length_m: lengthM,
+          room_width_m: widthM,
+          wall_assignments: { ...EMPTY_WALL_ASSIGNMENTS },
+          wall_openings: { ...EMPTY_WALL_ASSIGNMENTS },
+        };
+        setMbBrief(withRoom);
+        await mbSyncIntake(withRoom);
+      } else {
+        setMbBrief(resp.updated_brief as Record<string, unknown>);
+      }
+    } catch (e: unknown) {
+      showError(e);
     } finally {
       setMbProcessing(false);
     }
@@ -891,13 +911,18 @@ function MoodboardTab() {
     if (mbFloorplanRefs.length && room?.id) void mbSyncIntake(next);
   }
 
+  const mbHasWallItems = useMemo(() => {
+    const wa = (mbBrief as any).wall_assignments as WallAssignments | undefined;
+    if (!wa) return false;
+    return (["north", "south", "east", "west"] as WallId[]).some((w) => (wa[w]?.length ?? 0) > 0);
+  }, [mbBrief]);
+
   async function onGenerateWallMoodboard() {
-    if (!(mbBrief as any)?.selected_room_id) {
-      setMbError("Select a room from the floor plan first.");
+    if (!mbSelectedRoomId) {
+      showError(new Error("Select a room from the floor plan first."));
       return;
     }
     setMbBusy(true);
-    setMbError(null);
     setMbGenStatus("Planning panels per wall…");
     try {
       const style = mbStyleRefs.map((r) => ({ mime_type: r.mime_type, data_base64: r.data_base64 }));
@@ -911,8 +936,8 @@ function MoodboardTab() {
       const batchId = String(Date.now());
       setMbPanels((prev) => mergeMoodboardPanels(prev, resp.panels ?? [], batchId));
       setMbGenStatus("");
-    } catch (e: any) {
-      setMbError(e?.message ?? String(e));
+    } catch (e: unknown) {
+      showError(e);
       setMbGenStatus("");
     } finally {
       setMbBusy(false);
@@ -924,11 +949,14 @@ function MoodboardTab() {
     setMbFloorplanRefs([]);
     setMbStyleRefs([]);
     setMbPanels([]);
-    setMbError(null);
     setMbGenStatus("");
   }
 
-  const canGenerateMb = Boolean((mbBrief as any)?.selected_room_id) && !mbBusy && !mbSyncing && !mbProcessing;
+  const canGenerateMb =
+    Boolean(mbSelectedRoomId) &&
+    !mbBusy &&
+    !mbSyncing &&
+    !mbProcessing;
 
   return (
     <div className="moodboardPanel">
@@ -1004,12 +1032,12 @@ function MoodboardTab() {
         </section>
       ) : null}
 
-      {(mbBrief as any)?.selected_room_id && !mbSyncing ? (
+      {mbSelectedRoomId && !mbSyncing ? (
         <section className="card" style={{ marginTop: 14 }}>
           <div className="cardTitle">3. Wall structure & furniture</div>
           <p className="muted" style={{ marginBottom: 10 }}>
-            Openings come from the plan. Click each wall to place items (sofa, TV, wardrobe, etc.). Leave empty and we
-            will suggest components when generating.
+            Openings are read from your floor plan (N/E/S/W). Place each component on the wall where it belongs —
+            the generated backdrop will show that wall&apos;s doors/windows only (from the plan).
           </p>
           <WallLayout
             key={String((mbBrief as any).selected_room_id)}
@@ -1062,9 +1090,14 @@ function MoodboardTab() {
           disabled={mbBusy}
         />
         <p className="muted" style={{ marginTop: 6, fontSize: 12 }}>
-          Generates <strong>multiple style options per component</strong> with its wall/floor background (paneling,
-          floor finish, lighting) — one hero item per image, not a full furnished room.
+          <strong>One image per component</strong> (not full room). Uses floor plan wall structure + your wall
+          placements. Set items in step 3 for correct N/E/S/W positions.
         </p>
+        {!mbHasWallItems && mbSelectedRoomId && !mbSyncing ? (
+          <p className="pill warn" style={{ marginTop: 8 }}>
+            Place components on walls in step 3 for accurate placement (defaults used if skipped).
+          </p>
+        ) : null}
         <div className="uploadRow" style={{ marginTop: 10 }}>
           <label className="fileBtn">
             <input
@@ -1111,12 +1144,6 @@ function MoodboardTab() {
             Creating {mbVariantsPerWall} option{mbVariantsPerWall === 1 ? "" : "s"} per wall
             {mbPanels.length ? " (previous results stay visible below)" : ""} — this can take several minutes.
           </p>
-        ) : null}
-        {mbError ? (
-          <div className="error" style={{ marginTop: 12 }}>
-            <div className="errorTitle">Error</div>
-            <pre className="errorBody">{mbError}</pre>
-          </div>
         ) : null}
       </section>
 
@@ -1189,7 +1216,7 @@ export function App() {
   const [genStep, setGenStep] = useState<
     "idle" | "analyzing" | "services" | "materials" | "catalog" | "rendering" | "pricing" | "done" | "error"
   >("idle");
-  const [error, setError] = useState<string | null>(null);
+  const [popupError, setPopupError] = useState<UiError | null>(null);
   const [styleRefs, setStyleRefs] = useState<UploadedRef[]>([]);
   const [floorplanRefs, setFloorplanRefs] = useState<UploadedRef[]>([]);
   const [floorplanPreview, setFloorplanPreview] = useState<UploadedRef | null>(null);
@@ -1197,7 +1224,10 @@ export function App() {
   const [skipWallLayout, setSkipWallLayout] = useState(false);
   const [skipDesignMaterials, setSkipDesignMaterials] = useState(false);
   const [catalogMaterials, setCatalogMaterials] = useState<CatalogMaterial[]>([]);
-  const [catalogMaterialsError, setCatalogMaterialsError] = useState<string | null>(null);
+
+  const showError = (e: unknown) => {
+    setPopupError(toUiError(e));
+  };
 
   const isGenerating =
     isBusy && genStep !== "idle" && genStep !== "done" && genStep !== "error";
@@ -1262,11 +1292,10 @@ export function App() {
         const mats = await fetchCatalogMaterials();
         if (!cancelled) {
           setCatalogMaterials(mats);
-          setCatalogMaterialsError(null);
         }
       } catch (e) {
         if (!cancelled) {
-          setCatalogMaterialsError(e instanceof Error ? e.message : String(e));
+          showError(e);
         }
       }
     })();
@@ -1331,7 +1360,7 @@ export function App() {
 
   async function syncFloorplanIntake(nextBrief: Record<string, unknown>) {
     if (!floorplanRefs.length) return;
-    setError(null);
+    setPopupError(null);
     setSyncingPlan(true);
     setIsBusy(true);
     try {
@@ -1353,8 +1382,8 @@ export function App() {
       setBrief(resp.updated_brief as Record<string, unknown>);
       setPendingQuestions(resp.questions);
       setIsComplete(resp.is_complete);
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e: unknown) {
+      showError(e);
     } finally {
       setSyncingPlan(false);
       setIsBusy(false);
@@ -1416,14 +1445,12 @@ export function App() {
   }
 
   async function onPickStyleImages(files: FileList | null) {
-    setError(null);
     const converted = await toUploadedRefs(files, 6);
     if (!converted.length) return;
     setStyleRefs((prev) => [...prev, ...converted].slice(0, 6));
   }
 
   async function onPickFloorplan(files: FileList | null) {
-    setError(null);
     const converted = await toUploadedRefs(files, 1);
     if (!converted.length) return;
     const newFp = converted.slice(0, 1);
@@ -1459,8 +1486,8 @@ export function App() {
       setPendingQuestions([]);
       setIsComplete(resp.is_complete);
       setChat([...nextChat, ...intakeAssistantTail(resp.is_complete, true)]);
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e: unknown) {
+      showError(e);
       setFloorplanRefs([]);
     } finally {
       setProcessingFloorplan(false);
@@ -1471,7 +1498,7 @@ export function App() {
   async function onSend() {
     const trimmed = input.trim();
     if (!trimmed || isBusy) return;
-    setError(null);
+    setPopupError(null);
     setDesigns([]);
 
     const nextChat = [...chat, { role: "user" as const, content: trimmed }];
@@ -1490,8 +1517,8 @@ export function App() {
       setPendingQuestions([]);
       setIsComplete(resp.is_complete);
       setChat([...nextChat, ...intakeAssistantTail(resp.is_complete, floorplanImages.length > 0)]);
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e: unknown) {
+      showError(e);
     } finally {
       setIsBusy(false);
     }
@@ -1499,7 +1526,7 @@ export function App() {
 
   async function onGenerate() {
     if (isBusy) return;
-    setError(null);
+    setPopupError(null);
     setIsBusy(true);
     setDesigns([]);
     setGenStep("analyzing");
@@ -1544,8 +1571,8 @@ export function App() {
       if (t3) window.clearTimeout(t3);
       if (t4) window.clearTimeout(t4);
       if (t5) window.clearTimeout(t5);
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e: unknown) {
+      showError(e);
       setGenStep("error");
     } finally {
       setIsBusy(false);
@@ -1566,7 +1593,7 @@ export function App() {
     setDesigns([]);
     setDesignCurrency("INR");
     setGenStep("idle");
-    setError(null);
+    setPopupError(null);
     setInput("");
     setStyleRefs([]);
     setFloorplanRefs([]);
@@ -1714,11 +1741,6 @@ export function App() {
               ))}
             </select>
           </div>
-          {catalogMaterialsError ? (
-            <p className="pill warn" style={{ marginTop: 8 }}>
-              Could not load catalog: {catalogMaterialsError}
-            </p>
-          ) : null}
 
           <SpeechInput
             label="Speak or type preferences (optional)"
@@ -1955,16 +1977,6 @@ export function App() {
             </button>
           </div>
 
-          {error ? (
-            <div className="error">
-              <div className="errorTitle">Error</div>
-              <pre className="errorBody">{error}</pre>
-              <div className="hint">
-                Make sure the backend is running and that <code>GEMINI_API_KEY</code> is set in <code>.env</code>.
-              </div>
-            </div>
-          ) : null}
-
           <div className="statusRow">
             <div className={`pill ${isComplete ? "ok" : "warn"}`}>
               {isComplete ? "Brief complete" : "Needs more info"}
@@ -2130,8 +2142,10 @@ export function App() {
       </div>
         </>
       ) : (
-        <MoodboardTab />
+        <MoodboardTab showError={showError} />
       )}
+
+      <ErrorPopup error={popupError} onClose={() => setPopupError(null)} />
 
       {floorplanPreview ? (
         <div

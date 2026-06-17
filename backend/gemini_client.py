@@ -600,8 +600,8 @@ def plan_moodboard_wall_panels(
         "You plan interior design moodboards like a professional component deck (one image per component).\n"
         "Example titles: 'Sofa — South wall', 'TV unit — North wall', 'Coffee table — floor', 'Dining table — floor'.\n"
         "Given a room brief with compass wall assignments, produce panels for each assigned item on each wall.\n"
-        "- REQUIRED: one panel per component in brief.wall_assignments (sofa, tv_unit, wardrobe, etc.) — never bundle "
-        "multiple components into one panel.\n"
+        "- REQUIRED: one panel per component in brief.wall_assignments — never bundle multiple components.\n"
+        "- REQUIRED: honor brief.wall_openings from the floor plan on each compass wall (doors/windows).\n"
         "- REQUIRED zone_id 'floor' panels for standard center-floor items (coffee table, dining table, bed, rug) "
         "when not already on a wall.\n"
         "- Optional zone_id 'ceiling' (false ceiling / lighting); skip zone_id 'overview'.\n"
@@ -614,6 +614,8 @@ def plan_moodboard_wall_panels(
         "- Coffee table / dining table / bed: hero item on styled floor with partial wall context — NOT a full room layout.\n"
         "- List floor items in suggested_floor_items.\n"
         "Each image_prompt must describe exactly ONE catalog component with materials and style.\n"
+        "Every image_prompt must respect brief.wall_assignments and brief.wall_openings — "
+        "sofa on south wall stays on south, TV on north stays on north, matching the floor plan.\n"
         "If brief.wall_assignments are all empty, fill suggested_wall_assignments with sensible defaults.\n"
         "Output ONLY valid JSON matching the schema."
     )
@@ -666,12 +668,12 @@ def generate_images_with_floorplan(
 
     client = _client(cfg)
     intro = (
-        "Render one photorealistic interior photo. The FIRST attached image is the floor plan (authoritative).\n"
-        "Read the text starting with '=== DIRECTOR MANDATE ===' and match it exactly before applying style.\n"
-        "If the DIRECTOR says bed on the FAR/BACK (NORTH) wall: the bed headboard must be on the deepest wall "
-        "in frame (view from south doorway), NOT on the left or right side walls.\n"
-        "TV on WEST = left wall only. Doors/windows only on walls listed. No extra openings.\n"
-        "No logo, watermark, or compass overlay.\n\n"
+        "Render one COMPONENT-ONLY photorealistic moodboard image (not a full room). "
+        "The FIRST attached image is the floor plan (authoritative for wall structure).\n"
+        "The BACKDROP WALL behind the hero must match the floor plan: show doors/windows ONLY "
+        "if they are on that compass wall in the plan; never move a window from another wall onto this backdrop.\n"
+        "Read '=== HERO WALL BACKDROP ===' and 'FLOOR PLAN WALL STRUCTURE' before applying style.\n"
+        "Tight crop: ONE component + its wall zone. No full-room panorama. No logo or compass overlay.\n\n"
     )
     parts: List[types.Part] = [types.Part.from_text(text=intro + prompt)]
     for img in floorplan_images[:1]:

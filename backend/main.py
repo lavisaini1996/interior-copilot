@@ -30,9 +30,9 @@ from backend.llm import (
 )
 from backend.moodboard_frame import apply_material_board_frame
 from backend.moodboard_walls import (
-    enrich_moodboard_image_prompt,
-    ensure_floor_panel,
+    ensure_default_wall_assignments,
     expand_panels_per_component,
+    finalize_moodboard_component_prompt,
     merge_suggested_assignments,
     merge_suggested_floor_items,
     render_moodboard_images_parallel,
@@ -865,72 +865,99 @@ def catalog_materials() -> List[Dict[str, Any]]:
     ]
 
 
+
+def _hydrate_brief_from_floorplan(
+    cfg: Any,
+    brief: Dict[str, Any],
+    floor_imgs: List[Dict[str, str]],
+    *,
+    force_refresh_north: bool = False,
+    force_refresh_openings: bool = False,
+    always_refresh_openings: bool = False,
+) -> Dict[str, Any]:
+    """
+    Read rooms, dimensions, north bearing, and per-wall openings from floor plan images.
+    Used by intake and moodboard so wall structure matches the uploaded plan.
+    """
+    merged = dict(brief)
+    if not floor_imgs:
+        return merged
+
+    existing_rooms = merged.get("rooms_detected") or []
+    has_rooms = isinstance(existing_rooms, list) and len(existing_rooms) > 0
+    if not has_rooms:
+        try:
+            rooms = extract_rooms_from_floorplan(cfg=cfg, floorplan_images=floor_imgs)
+            if isinstance(rooms, dict) and isinstance(rooms.get("rooms"), list):
+                merged["rooms_detected"] = _normalize_rooms_detected_dims(rooms.get("rooms") or [])
+        except Exception:
+            logger.warning("extract_rooms_from_floorplan failed", exc_info=True)
+
+    merged = _reconcile_selected_room(merged)
+
+    if not _dims_ok(merged):
+        try:
+            extracted = extract_room_dimensions_from_floorplan(cfg=cfg, floorplan_images=floor_imgs)
+            merged = _merge_extracted_floorplan_dims(merged, extracted)
+        except Exception:
+            logger.warning("extract_room_dimensions_from_floorplan failed", exc_info=True)
+
+    skip_north = (
+        (not force_refresh_north)
+        and economy_mode()
+        and merged.get("floorplan_north_has_indicator")
+    )
+    if not skip_north:
+        try:
+            north_raw = extract_plan_north_from_floorplan(cfg=cfg, floorplan_images=floor_imgs)
+            merged = _merge_plan_north(merged, north_raw)
+        except Exception:
+            logger.warning("extract_plan_north_from_floorplan failed", exc_info=True)
+
+    merged["floorplan_north_clockwise_deg"] = _north_deg_from_brief(merged)
+    rid_o, rnm_o = _room_target_for_openings(merged)
+    refresh_openings = always_refresh_openings or force_refresh_openings or (
+        not economy_mode()
+    ) or (not _openings_populated(merged))
+    if refresh_openings and (rid_o or rnm_o):
+        merged["wall_openings"] = dict(_EMPTY_WALL_OPENINGS)
+    if floor_imgs and (rnm_o or rid_o) and refresh_openings:
+        try:
+            raw_o = extract_wall_openings_from_floorplan(
+                cfg=cfg,
+                floorplan_images=floor_imgs,
+                target_room_id=rid_o,
+                target_room_name=rnm_o,
+                rooms_detected=merged.get("rooms_detected") or [],
+                north_from_image_up_clockwise_deg=float(merged["floorplan_north_clockwise_deg"]),
+            )
+            merged["wall_openings"] = _normalize_wall_openings(
+                raw_o.get("wall_openings") if isinstance(raw_o, dict) else None
+            )
+        except Exception:
+            logger.warning("extract_wall_openings_from_floorplan failed", exc_info=True)
+
+    if floor_imgs and not _dims_ok(merged):
+        merged["use_floorplan_image_for_scale_only"] = True
+
+    return _reconcile_selected_room(merged)
+
+
 @app.post("/api/intake", response_model=IntakeResponse)
 def intake(req: IntakeRequest) -> IntakeResponse:
     try:
         cfg = env_config()
         merged_brief = _merge_brief(req.brief)
         floor_imgs = [img.model_dump() for img in req.floorplan_images]
-        force_refresh_north = _env_flag("INTAKE_REFRESH_NORTH")
-        force_refresh_openings = _env_flag("INTAKE_REFRESH_OPENINGS")
-
-        existing_rooms = merged_brief.get("rooms_detected") or []
-        has_rooms = isinstance(existing_rooms, list) and len(existing_rooms) > 0
-        if floor_imgs and not has_rooms:
-            try:
-                rooms = extract_rooms_from_floorplan(cfg=cfg, floorplan_images=floor_imgs)
-                if isinstance(rooms, dict) and isinstance(rooms.get("rooms"), list):
-                    merged_brief["rooms_detected"] = _normalize_rooms_detected_dims(rooms.get("rooms") or [])
-            except Exception:
-                pass
-        merged_brief = _reconcile_selected_room(merged_brief)
-
-        if floor_imgs and not _dims_ok(merged_brief):
-            try:
-                extracted = extract_room_dimensions_from_floorplan(cfg=cfg, floorplan_images=floor_imgs)
-                merged_brief = _merge_extracted_floorplan_dims(merged_brief, extracted)
-            except Exception:
-                pass
-
-        skip_north = (
-            (not force_refresh_north)
-            and economy_mode()
-            and merged_brief.get("floorplan_north_has_indicator")
+        merged_brief = _hydrate_brief_from_floorplan(
+            cfg,
+            merged_brief,
+            floor_imgs,
+            force_refresh_north=_env_flag("INTAKE_REFRESH_NORTH"),
+            force_refresh_openings=_env_flag("INTAKE_REFRESH_OPENINGS"),
         )
-        if floor_imgs and not skip_north:
-            try:
-                north_raw = extract_plan_north_from_floorplan(cfg=cfg, floorplan_images=floor_imgs)
-                merged_brief = _merge_plan_north(merged_brief, north_raw)
-            except Exception:
-                logger.warning("extract_plan_north_from_floorplan failed", exc_info=True)
-
-        merged_brief["floorplan_north_clockwise_deg"] = _north_deg_from_brief(merged_brief)
-        rid_o, rnm_o = _room_target_for_openings(merged_brief)
-        refresh_openings = (
-            force_refresh_openings
-            or (not economy_mode())
-            or (not _openings_populated(merged_brief))
-        )
-        if refresh_openings:
-            merged_brief["wall_openings"] = dict(_EMPTY_WALL_OPENINGS)
-        if floor_imgs and (rnm_o or rid_o) and refresh_openings:
-            try:
-                raw_o = extract_wall_openings_from_floorplan(
-                    cfg=cfg,
-                    floorplan_images=floor_imgs,
-                    target_room_id=rid_o,
-                    target_room_name=rnm_o,
-                    rooms_detected=merged_brief.get("rooms_detected") or [],
-                    north_from_image_up_clockwise_deg=float(merged_brief["floorplan_north_clockwise_deg"]),
-                )
-                merged_brief["wall_openings"] = _normalize_wall_openings(
-                    raw_o.get("wall_openings") if isinstance(raw_o, dict) else None
-                )
-            except Exception:
-                logger.warning("extract_wall_openings_from_floorplan failed", exc_info=True)
 
         updated = dict(merged_brief)
-        updated = _reconcile_selected_room(updated)
 
         if not _dims_ok(updated):
             extracted = _extract_dims_from_chat([m.model_dump() for m in req.chat_history])
@@ -982,6 +1009,19 @@ def moodboard_walls(req: MoodboardWallsRequest) -> MoodboardWallsResponse:
             raise HTTPException(status_code=400, detail="Select a room from the floor plan first.")
 
         fp_imgs = [img.model_dump() for img in req.floorplan_images]
+        if fp_imgs:
+            merged_brief = _hydrate_brief_from_floorplan(
+                cfg,
+                merged_brief,
+                fp_imgs,
+                always_refresh_openings=True,
+            )
+            logger.info(
+                "Moodboard plan sync — openings:\n%s\nassignments:\n%s",
+                _format_wall_openings_text(merged_brief) or "(none detected)",
+                _format_wall_layout_text(merged_brief) or "(none placed)",
+            )
+
         ctx = [img.model_dump() for img in req.context_images]
         context_for_plan = fp_imgs + ctx
 
@@ -994,6 +1034,7 @@ def moodboard_walls(req: MoodboardWallsRequest) -> MoodboardWallsResponse:
         merged_brief = merge_suggested_assignments(
             merged_brief, plan_raw.get("suggested_wall_assignments")
         )
+        merged_brief = ensure_default_wall_assignments(merged_brief)
         merged_brief = merge_suggested_floor_items(
             merged_brief, plan_raw.get("suggested_floor_items")
         )
@@ -1001,14 +1042,19 @@ def moodboard_walls(req: MoodboardWallsRequest) -> MoodboardWallsResponse:
         raw_panels = plan_raw.get("panels")
         if not isinstance(raw_panels, list):
             raw_panels = []
-        raw_panels = ensure_floor_panel(
-            raw_panels, brief=merged_brief, variants_per_wall=req.variants_per_wall
-        )
         raw_panels = expand_panels_per_component(
             raw_panels,
             brief=merged_brief,
             variants_per_component=req.variants_per_wall,
         )
+        if not raw_panels:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No components to render. Place items on walls in step 3 "
+                    "(e.g. sofa on south, TV on north) so each gets its own component image."
+                ),
+            )
 
         panels_out: List[MoodboardWallPanelOut] = []
         image_jobs: list[tuple[int, int, str]] = []
@@ -1038,7 +1084,7 @@ def moodboard_walls(req: MoodboardWallsRequest) -> MoodboardWallsResponse:
                 prompt = str(rv.get("image_prompt") or "").strip()
                 if not prompt:
                     continue
-                prompt = enrich_moodboard_image_prompt(
+                prompt = finalize_moodboard_component_prompt(
                     prompt,
                     brief=merged_brief,
                     zone_id=zone_id,

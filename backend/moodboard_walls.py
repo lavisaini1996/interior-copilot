@@ -8,6 +8,13 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Tuple
 
+from backend.wall_placement import (
+    build_component_wall_shot_block,
+    build_hero_wall_backdrop_block,
+    build_layout_ascii_diagram,
+    build_openings_detailed_block,
+)
+
 logger = logging.getLogger("interior_copilot.moodboard_walls")
 
 WALL_ZONE_IDS = ("north", "south", "east", "west")
@@ -340,18 +347,22 @@ def zone_background_block(brief: Dict[str, Any], wall: str, component_id: str) -
     ]
 
     if wall in WALL_ZONE_IDS:
-        openings = _openings_for_wall(brief, wall)
         backdrops = _wall_backdrop_labels(brief, wall, cid)
-        lines.append(
-            f"  • {wall.title()} wall behind the hero: full wall finish — paneling, moulding, paint, wallpaper, "
-            "stone, or feature treatment matching the style brief."
-        )
+        backdrop_block = build_hero_wall_backdrop_block(wall, cid, brief)
+        if backdrop_block:
+            lines.append(backdrop_block)
+        else:
+            openings = _openings_for_wall(brief, wall)
+            lines.append(
+                f"  • {wall.title()} wall behind the hero: full wall finish — paneling, moulding, paint, "
+                "wallpaper, stone, or feature treatment matching the style brief."
+            )
+            if openings:
+                lines.append(f"  • Openings on this wall only: {openings}.")
         if backdrops:
             lines.append(
                 f"  • Same-wall context (supporting elements, not separate heroes): {', '.join(backdrops)}."
             )
-        if openings:
-            lines.append(f"  • Openings on this wall: {openings}.")
         lines.append(
             "  • Visible floor finish in the lower third (marble, herringbone wood, tile, or rug edge at base)."
         )
@@ -403,6 +414,72 @@ def _generic_variant_hints(component_id: str, n: int) -> List[str]:
         f"{label} — bold statement finish aligned with the style brief",
     ]
     return base[: max(1, n)]
+
+
+COMPONENT_ONLY_MANDATE = (
+    "=== COMPONENT-ONLY IMAGE (mandatory) ===\n"
+    "Render exactly ONE catalog component in frame — tight crop on that item and its immediate wall zone.\n"
+    "FORBIDDEN: full-room wide shot, panorama, opposing walls both visible, extra sofas/TVs/tables/beds, "
+    "furnished living-room scene, overview layout.\n"
+    "ALLOWED: hero component + its assigned wall materials + narrow floor strip + doors/windows on THAT wall only."
+)
+
+
+def build_compact_wall_structure_block(brief: Dict[str, Any], hero_wall: str) -> str:
+    """Wall structure + placements from floor plan — compact, no full-room camera."""
+    assignments = normalize_wall_assignments(brief.get("wall_assignments"))
+    openings = normalize_wall_openings(brief.get("wall_openings"))
+    room = str(brief.get("selected_room_name") or brief.get("space_type") or "room").strip()
+    hero = str(hero_wall or "").strip().lower()
+
+    lines: List[str] = [
+        "FLOOR PLAN WALL STRUCTURE (binding — match attached plan; do not move items or openings):",
+        f"Room: {room}.",
+    ]
+
+    ln = brief.get("room_length_m")
+    wd = brief.get("room_width_m")
+    try:
+        if ln and wd and float(ln) > 0 and float(wd) > 0:
+            lines.append(f"Proportions: {float(ln):.2f} m × {float(wd):.2f} m (north–south × east–west).")
+    except (TypeError, ValueError):
+        pass
+
+    north_deg = brief.get("floorplan_north_clockwise_deg")
+    if north_deg is not None:
+        try:
+            lines.append(
+                f"Plan north: {float(north_deg) % 360:.0f}° clockwise from top of sheet — "
+                "N/E/S/W walls follow the floor plan."
+            )
+        except (TypeError, ValueError):
+            pass
+
+    for wid, wname in [("north", "NORTH"), ("south", "SOUTH"), ("east", "EAST"), ("west", "WEST")]:
+        items = [component_display_label(normalize_component_id(x)) for x in (assignments.get(wid) or [])]
+        ops = [str(x).strip() for x in (openings.get(wid) or []) if str(x).strip()]
+        furn = ", ".join(items) if items else "(none)"
+        op_txt = "; ".join(ops) if ops else "(none)"
+        tag = "  << HERO WALL FOR THIS IMAGE" if wid == hero else ""
+        lines.append(f"  {wname}: furniture={furn}; openings={op_txt}.{tag}")
+
+    lines.append(
+        "Rules: furniture stays on its listed wall; openings only on listed walls; "
+        "never invent or relocate doors/windows; never mirror the plan."
+    )
+    return "\n".join(lines)
+
+
+def polish_component_moodboard_prompt(prompt: str, brief: Dict[str, Any]) -> str:
+    """Light polish for single-component shots — avoids full-room render instructions."""
+    out = (prompt or "").strip()
+    note = (
+        "Photorealistic single-component moodboard panel. Accurate scale. "
+        "Match floor plan wall structure. No N/S/E/W text, logo, or watermark in the image."
+    )
+    if note.lower() not in out.lower():
+        out = f"{out}\n\n{note}".strip()
+    return out
 
 
 def variant_hints_for_component(component_id: str, n: int) -> List[str]:
@@ -540,22 +617,30 @@ def expand_panels_per_component(
                 )
             )
 
-    for cid in _floor_component_ids(brief):
-        key = ("floor", cid)
-        if key in seen or any(normalize_component_id(c) == cid for w in WALL_ZONE_IDS for c in assignments[w]):
-            continue
-        seen.add(key)
-        label = component_display_label(cid)
-        out.append(
-            _component_panel(
-                cid,
-                wall="floor",
-                brief=brief,
-                variants_per_component=variants_per_component,
-                title=f"{label} — floor",
-                openings_summary="Center-floor component",
+    # Floor components only when user explicitly lists them (not auto coffee table/rug).
+    custom_floor = brief.get("moodboard_floor_items")
+    if isinstance(custom_floor, list):
+        for raw in custom_floor:
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            cid = normalize_component_id(raw)
+            if not cid:
+                continue
+            key = ("floor", cid)
+            if key in seen or any(normalize_component_id(c) == cid for w in WALL_ZONE_IDS for c in assignments[w]):
+                continue
+            seen.add(key)
+            label = component_display_label(cid)
+            out.append(
+                _component_panel(
+                    cid,
+                    wall="floor",
+                    brief=brief,
+                    variants_per_component=variants_per_component,
+                    title=f"{label} — floor",
+                    openings_summary="User-specified floor component",
+                )
             )
-        )
 
     if out:
         return out
@@ -650,32 +735,28 @@ def enrich_moodboard_image_prompt(
     elif shot == "freestanding" or (zone_id == "floor" and zone_type == "component"):
         bg = zone_background_block(brief, zone_id, primary)
         extra = (
-            f"SHOT TYPE: Hero component with zone background — {label} in its designed setting.\n"
-            f"CAMERA: Three-quarter or front view; medium crop on the {label} and its wall/floor context.\n"
+            f"{COMPONENT_ONLY_MANDATE}\n\n"
+            f"SHOT: Single {label} only — product vignette on the {zone_id.upper() if zone_id in WALL_ZONE_IDS else 'floor'} zone.\n"
+            f"CAMERA: Medium-tight crop on this one {label}; wall/floor context at edges only.\n"
             f"{bg}\n"
-            "COMPOSITION: Hero = this one furniture piece. Include the styled wall behind, floor finish below, "
-            "and lighting above — like a professional interior component board slide.\n"
-            "STRICT: Do not add other hero furniture (no extra sofas, tables, TVs, beds). "
-            "Background decor on the same wall is allowed.\n"
-            "Never use a plain neutral studio backdrop."
+            "Do not show other hero furniture. No full-room shot."
         )
     elif zone_id == "floor" or zone_type == "floor":
         bg = zone_background_block(brief, zone_id, primary)
         extra = (
-            f"SHOT TYPE: Floor component with room-zone background — {label}.\n"
+            f"{COMPONENT_ONLY_MANDATE}\n\n"
+            f"SHOT: Single floor component — {label} only.\n"
             f"{bg}\n"
-            "Show the floor finish and partial wall context; no other hero furniture pieces."
+            "Partial wall glimpses at edges OK; no other furniture heroes."
         )
     else:
         bg = zone_background_block(brief, zone_id, primary)
         extra = (
-            f"SHOT TYPE: Wall component with full zone background — {label} on "
-            f"{zone_id.upper()} wall.\n"
-            "CAMERA: Straight-on or slight three-quarter elevation on this wall segment.\n"
+            f"{COMPONENT_ONLY_MANDATE}\n\n"
+            f"SHOT: Wall component elevation — {label} on {zone_id.upper()} wall only.\n"
+            "CAMERA: Straight-on or slight angle on this wall segment; tight crop.\n"
             f"{bg}\n"
-            "COMPOSITION: Built-in/wall-mounted hero integrated into finished wall materials, joinery, "
-            "and lighting. Floor finish visible below. No furniture from other zones.\n"
-            "Reference style: TV-wall / feature-wall moodboard with rich background, photorealistic."
+            "TV-wall / feature-wall style vignette. No sofas, beds, or center-floor furniture."
         )
 
     if style:
@@ -693,6 +774,54 @@ def enrich_moodboard_image_prompt(
     if floor_block in base:
         return base
     return f"{base}\n\n{extra}".strip()
+
+
+def finalize_moodboard_component_prompt(
+    prompt: str,
+    *,
+    brief: Dict[str, Any],
+    zone_id: str,
+    zone_type: str,
+    components: List[str],
+) -> str:
+    """Component-only prompt with floor-plan wall structure and correct wall placement."""
+    primary = normalize_component_id(components[0]) if components else ""
+    hero_wall = zone_id if zone_id in WALL_ZONE_IDS else "floor"
+    style_prompt = enrich_moodboard_image_prompt(
+        prompt,
+        brief=brief,
+        zone_id=zone_id,
+        zone_type=zone_type,
+        components=components,
+    )
+
+    blocks: List[str] = [COMPONENT_ONLY_MANDATE]
+
+    if primary and hero_wall in WALL_ZONE_IDS:
+        backdrop = build_hero_wall_backdrop_block(hero_wall, primary, brief)
+        if backdrop:
+            blocks.append(backdrop)
+
+    structure = build_compact_wall_structure_block(brief, hero_wall)
+    if structure:
+        blocks.append(structure)
+
+    openings_detail = build_openings_detailed_block(brief)
+    if openings_detail:
+        blocks.append(openings_detail)
+
+    ascii_diag = build_layout_ascii_diagram(brief)
+    if ascii_diag:
+        blocks.append(ascii_diag)
+
+    if primary:
+        placement_shot = build_component_wall_shot_block(hero_wall, primary, brief)
+        if placement_shot:
+            blocks.append(placement_shot)
+
+    blocks.append(style_prompt)
+    combined = "\n\n".join(b for b in blocks if b.strip())
+    return polish_component_moodboard_prompt(combined, brief)
 
 
 def ensure_floor_panel(
@@ -790,13 +919,37 @@ def moodboard_plan_schema() -> Dict[str, Any]:
 def merge_suggested_assignments(brief: Dict[str, Any], suggested: Any) -> Dict[str, Any]:
     """Fill empty wall_assignments from planner suggestions."""
     if not isinstance(suggested, dict):
-        return brief
+        return ensure_default_wall_assignments(brief)
     current = normalize_wall_assignments(brief.get("wall_assignments"))
     has_any = any(current[k] for k in WALL_ZONE_IDS)
     if has_any:
         return brief
     out = dict(brief)
     out["wall_assignments"] = normalize_wall_assignments(suggested)
+    return ensure_default_wall_assignments(out)
+
+
+DEFAULT_WALL_ASSIGNMENTS_BY_ROOM: Dict[str, Dict[str, List[str]]] = {
+    "living": {"north": ["tv_unit"], "south": ["sofa"], "east": [], "west": []},
+    "bedroom": {"north": ["bed"], "west": ["tv_unit"], "south": [], "east": []},
+    "dining": {"north": ["sideboard"], "south": [], "east": [], "west": []},
+    "kitchen": {"north": ["wall_cabinets"], "south": ["base_cabinets"], "east": [], "west": []},
+    "study": {"north": ["bookshelf"], "south": ["desk"], "east": [], "west": []},
+    "bathroom": {"north": ["vanity"], "south": [], "east": [], "west": []},
+}
+
+
+def ensure_default_wall_assignments(brief: Dict[str, Any]) -> Dict[str, Any]:
+    """Sensible default placements when the user has not clicked walls yet."""
+    current = normalize_wall_assignments(brief.get("wall_assignments"))
+    if any(current[k] for k in WALL_ZONE_IDS):
+        return brief
+    kind = infer_room_kind(brief)
+    defaults = DEFAULT_WALL_ASSIGNMENTS_BY_ROOM.get(kind)
+    if not defaults:
+        return brief
+    out = dict(brief)
+    out["wall_assignments"] = normalize_wall_assignments(defaults)
     return out
 
 
